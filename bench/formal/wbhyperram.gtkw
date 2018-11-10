@@ -1,0 +1,116 @@
+[*]
+[*] GTKWave Analyzer v3.3.66 (w)1999-2015 BSI
+[*] Fri Nov  9 23:48:00 2018
+[*]
+[dumpfile] "(null)"
+[savefile] "/home/dan/work/rnd/opencores/wbhyperram/trunk/bench/formal/wbhyperram.gtkw"
+[timestart] 7
+[size] 1658 906
+[pos] -1 -1
+*-3.594141 120 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+[treeopen] wbhyperram.
+[treeopen] wbhyperram.busproperties.
+[sst_width] 196
+[signals_width] 174
+[sst_expanded] 1
+[sst_vpaned_height] 448
+@28
+wbhyperram.f_past_valid
+wbhyperram.i_reset
+wbhyperram.i_clk
+@200
+-
+@28
+[color] 2
+wbhyperram.i_wb_cyc
+[color] 2
+wbhyperram.i_wb_stb
+[color] 2
+wbhyperram.i_wb_we
+@22
+[color] 2
+wbhyperram.i_wb_addr[21:0]
+[color] 2
+wbhyperram.i_wb_data[31:0]
+[color] 2
+wbhyperram.i_wb_sel[3:0]
+@28
+[color] 3
+wbhyperram.o_wb_ack
+@22
+[color] 3
+wbhyperram.o_wb_data[31:0]
+@28
+[color] 3
+wbhyperram.o_wb_stall
+@200
+-
+@28
+[color] 1
+wbhyperram.o_hram_reset_n
+[color] 1
+wbhyperram.o_hram_cke
+[color] 1
+wbhyperram.o_hram_csn
+@22
+[color] 1
+wbhyperram.o_hram_data[15:0]
+@28
+[color] 1
+wbhyperram.o_hram_drive_data
+@29
+[color] 1
+wbhyperram.o_hram_rwctrl[1:0]
+@28
+[color] 1
+wbhyperram.o_hram_rwds[1:0]
+@22
+[color] 3
+wbhyperram.i_hram_data[15:0]
+@28
+[color] 3
+wbhyperram.i_hram_rwds
+@200
+-
+@28
+wbhyperram.f_nacks[2:0]
+wbhyperram.f_nreqs[2:0]
+@200
+-
+@28
+wbhyperram.dev_addr
+wbhyperram.mem_addr
+wbhyperram.start_stb
+wbhyperram.bus_stb
+wbhyperram.read_stb
+wbhyperram.write_stb
+@200
+-
+@28
+wbhyperram.cti_dev
+wbhyperram.cti_write
+@200
+-
+@28
+wbhyperram.cmd_output
+wbhyperram.cmd_ctr[1:0]
+@22
+wbhyperram.cmd_reg[47:0]
+@200
+-
+@22
+wbhyperram.data_mask[3:0]
+wbhyperram.data_reg[31:0]
+@28
+wbhyperram.write_data_shift
+@200
+-
+@22
+wbhyperram.read_ctr[3:0]
+@200
+-
+@22
+wbhyperram.write_ctr[3:0]
+wbhyperram.fv_cmd[47:0]
+[pattern_trace] 1
+[pattern_trace] 0

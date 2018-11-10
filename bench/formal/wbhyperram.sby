@@ -1,0 +1,21 @@
+[tasks]
+prf
+cvr
+
+[options]
+prf: mode	prove
+cvr: mode	cover
+prf: depth 30
+cvr: depth 120
+
+[engines]
+smtbmc
+
+[script]
+read -formal fwb_slave.v
+read -formal wbhyperram.v
+prep -top wbhyperram
+
+[files]
+fwb_slave.v
+../../rtl/wbhyperram.v

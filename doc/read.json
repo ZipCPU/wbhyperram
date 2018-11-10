@@ -1,0 +1,19 @@
+{signal: [
+  {name: 'i_clk',        wave: 'p...........'},
+  {name: 'i_wb_cyc',     wave: '01.........0'},
+  {name: 'i_wb_stb',     wave: '010.........'},
+  {name: 'i_wb_we',      wave: 'x0x.........'},
+  {name: 'i_wb_addr',    wave: 'x3x.........', data: ['A0']},
+  {name: 'o_wb_stall',   wave: 'x01........x'},
+  {name: 'o_wb_ack',     wave: '0.........10'},
+  {name: 'o_wb_data',    wave: 'x.........3x', data: ['D0']},
+  {},
+  {name: 'counter',      wave: '444444444444', data: ['0','0','9','8','7','6','5','4','3','2','1','0']},
+  {},
+  {name: 'o_hram_csn',   wave: '1.0.......1.'},
+  {name: 'o_hram_cke',   wave: 'xx0........x'},
+  {name: 'i_hram_rwds',  wave: 'xxx0..x0pppx'},
+  {name: 'o_hram_data',  wave: 'xx3..xxxxxxx', data: ['CMD0']},
+  {name: 'raw_pin_data', wave: 'xxxxxxxx3.5.', data: ['D0','D1']},
+  {name: 'i_hram_data',  wave: 'xxxxxxxxx3.5', data: ['D0','D1']}
+]}
