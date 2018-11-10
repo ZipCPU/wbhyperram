@@ -64,37 +64,49 @@ module wbhyperram(i_clk, i_reset,
 	parameter	CLOCK_RATE_HZ = 100_000_000;
 	//
 	parameter [0:0]	OPT_PIPE  = 1'b1;
-	parameter [0:0]	OPT_FIXED_LATENCY = 1'b0;
 	//
-	parameter	LATENCY_COUNT = DEFAULT_LATENCY_COUNT;
+`ifdef	FORMAL
+	parameter [0:0]	F_OPT_COVER = 1'b0;
+`endif
 	//
-	localparam	RWDS_HIGH = 2'b00,
-			RWDS_LOW  = 2'b01,
-			RWDS_LCL  = 2'b10,
-			RWDS_INPT = 2'b11;
+	localparam [0:0] RWDS_IN = 1'b0,
+			RWDS_OUT = 1'b1;
+
 	localparam	DW = 32;
 	localparam	MIN_LATENCY_COUNT = (CLOCK_RATE_HZ <= 83_000_000) ? 3
 			: (CLOCK_RATE_HZ <= 100_000_000) ? 4
 			: (CLOCK_RATE_HZ <= 133_000_000) ? 5 : 6;
 	localparam	CLOCK_PERIOD_NS = 1000_000_000 / CLOCK_RATE_HZ;
-	localparam	CK_VCS = 150_000 / CLOCK_PERIOD_NS,
-			CK_RWR = ((40 +CLOCK_PERIOD_NS-1) / CLOCK_PERIOD_NS),
+	localparam	
+`ifdef	FORMAL
+			CK_VCS= (F_OPT_COVER) ? 12 :(150_000 / CLOCK_PERIOD_NS),
+			CK_RP = (F_OPT_COVER) ? 6
+				: ((200+CLOCK_PERIOD_NS-1)/CLOCK_PERIOD_NS),
+			// Maximum time CS# can be active
+			CK_CSM = (F_OPT_COVER) ? 50 : (4_000 / CLOCK_PERIOD_NS);
+`else
+			CK_VCS = 150_000 / CLOCK_PERIOD_NS,
 			// Minimum reset pulse width
 			CK_RP = ((200+CLOCK_PERIOD_NS-1)/CLOCK_PERIOD_NS),
 			// Maximum time CS# can be active
 			CK_CSM = 4_000 / CLOCK_PERIOD_NS;
-	localparam	CK_RWR_STALL = (CK_RWR>3) ? (CK_RWR-3) : 0;
+`endif
+	// localparam	CK_RWR_STALL = (CK_RWR>3) ? (CK_RWR-3) : 0;
 	localparam	CSM_BITS = (CK_CSM > 255) ? 9
 				: ((CK_CSM > 127) ? 8
 				: ((CK_CSM > 63) ? 7
 				: ((CK_CSM > 31) ? 6 : 5))),
-			VCS_BITS = (CK_VCS > 2047) ? 12
-				: ((CK_VCS > 1023) ? 11
-				: ((CK_VCS >  511) ? 10
-				: ((CK_VCS >  255) ?  9
-				: ((CK_VCS >  127) ?  8
-				: ((CK_VCS >   63) ?  7
-				: ((CK_VCS >   31) ? 6 : 5)))))),
+			VCS_BITS = (CK_VCS > 32767) ? 16
+				: ((CK_VCS > 16383) ? 15
+				: ((CK_VCS >  8191) ? 14
+				: ((CK_VCS >  4095) ? 13
+				: ((CK_VCS >  2047) ? 12
+				: ((CK_VCS >  1023) ? 11
+				: ((CK_VCS >   511) ? 10
+				: ((CK_VCS >   255) ?  9
+				: ((CK_VCS >   127) ?  8
+				: ((CK_VCS >    63) ?  7
+				: ((CK_VCS >    31) ? 6 : 5)))))))))),
 			RP_BITS = 5;
 	input	wire	i_clk, i_reset;
 	//
@@ -109,23 +121,28 @@ module wbhyperram(i_clk, i_reset,
 	//
 	// HyperRAM interface
 	output	reg		o_hram_reset_n, o_hram_cke, o_hram_csn;
-	output	reg	[1:0]	o_hram_rwctrl, o_hram_rwds;
-	input	wire		i_hram_rwds;
+	output	reg		o_hram_rwctrl;
+	output	reg	[1:0]	o_hram_rwds;
+	input	wire	[1:0]	i_hram_rwds;
 	output	reg		o_hram_drive_data;
 	input	wire	[15:0]	i_hram_data;
 	output	reg	[15:0]	o_hram_data;
 	//
 
+	reg	[2:0]	latency;
+	reg		fixed_latency;
 	reg	[47:0]	cmd_reg;
 	reg	[31:0]	data_reg;
 	reg	[3:0]	data_mask;
 	//
 	reg	[3:0]	state_ctr;
-	reg	[3:0]	read_ctr, write_ctr;
+	// verilator lint_off UNUSED
+	wire		write_stb, read_stb;
+	// verilator lint_on  UNUSED
 	reg	[1:0]	cmd_ctr;
 
 	reg	cmd_output, pipe_req;
-	wire	dev_addr, mem_addr, write_stb, read_stb, start_stb,
+	wire	dev_addr, mem_addr, start_stb,
 			pipe_stb, bus_stb;
 	reg	cti_dev, cti_write;	// Cycle type indication
 
@@ -149,23 +166,23 @@ module wbhyperram(i_clk, i_reset,
 	// Handle reset
 	//
 	//
-	reg	[RP_BITS-1:0]	reset_clock;
+	reg	[RP_BITS-1:0]	reset_low_counter;
 	reg	[VCS_BITS-1:0]	reset_recovery;
-	reg			rwr_stall, maintenance_stall;
+	reg			maintenance_stall;
 
-	initial	reset_clock = CK_RP[RP_BITS-1:0];
+	initial	reset_low_counter = CK_RP[RP_BITS-1:0];
 	always @(posedge i_clk)
 	if (i_reset)
-		reset_clock <= CK_RP[RP_BITS-1:0];
-	else if (reset_clock > 0)
-		reset_clock <= reset_clock - 1'b1;
+		reset_low_counter <= CK_RP[RP_BITS-1:0];
+	else if (reset_low_counter > 0)
+		reset_low_counter <= reset_low_counter - 1'b1;
 
 	initial	o_hram_reset_n = 1'b0;
 	always @(posedge i_clk)
 	if (i_reset)
 		o_hram_reset_n <= 1'b0;
 	else
-		o_hram_reset_n <= (reset_clock == 0);
+		o_hram_reset_n <= (reset_low_counter == 0);
 
 	initial	reset_recovery = CK_VCS[VCS_BITS-1:0];
 	always @(posedge i_clk)
@@ -173,6 +190,9 @@ module wbhyperram(i_clk, i_reset,
 		reset_recovery <= CK_VCS[VCS_BITS-1:0];
 	else if (reset_recovery > 0)
 		reset_recovery <= reset_recovery - 1'b1;
+
+	/*
+	reg	rwr_stall;
 
 	generate if (CK_RWR_STALL == 0)
 	begin : NO_RWR_STALL
@@ -202,14 +222,16 @@ module wbhyperram(i_clk, i_reset,
 			rwr_stall <= (rwr_recovery > 1);
 
 	end endgenerate
+	*/
 
+	initial	maintenance_stall = 1'b1;
 	always @(posedge i_clk)
 	if ((i_reset)||(!o_hram_reset_n))
 		maintenance_stall <= 1'b1;
 	else if (reset_recovery > 0)
 		maintenance_stall <= 1'b1;
 	else
-		maintenance_stall <= 1'b1;
+		maintenance_stall <= 1'b0;
 
 		
 
@@ -249,11 +271,6 @@ module wbhyperram(i_clk, i_reset,
 				&&(mem_addr)&&(!cti_dev)
 				&&(!cmd_output)&&(state_ctr == 2)
 				&&(i_wb_addr[AW-1:0] == next_addr);
-//
-// STB
-// PIP
-// (STB)&&(!STALL)
-// 
 	end else begin : NO_PIPE
 
 		always @(*)
@@ -264,7 +281,7 @@ module wbhyperram(i_clk, i_reset,
 		end
 
 		// Verilator lint_off UNUSED
-		wire	[6:0]	unused_pipe;
+		wire	[CSM_BITS-1:0]	unused_pipe;
 		assign	unused_pipe = chip_select_count;
 		// Verilator lint_on UNUSED
 		
@@ -287,6 +304,36 @@ module wbhyperram(i_clk, i_reset,
 	//
 	//
 	//
+
+	//////////////////////////
+	//
+	// o_wb_stall
+	//
+	reg	r_stall;
+	initial	r_stall = 1'b1;
+	always @(posedge i_clk)
+	if ((i_reset)||(maintenance_stall))
+		r_stall <= 1'b1;
+	else if (!i_wb_cyc)
+		r_stall <= 1'b0;
+	else if (chip_select_warning)
+		r_stall <= 1'b1;
+	else if (bus_stb)
+		r_stall <= 1'b1;
+	else if ((pipe_req)&&(state_ctr == 2))
+		r_stall <= 1'b0;
+	else if ((cmd_ctr>0)||(state_ctr > 1))
+		r_stall <= 1'b1;
+	else
+		r_stall <= 1'b0;
+
+	always @(*)
+		o_wb_stall = (r_stall)&&(!pipe_req);
+
+	//////////////////////////
+	//
+	// Command register output
+	//
 	initial	cmd_ctr = 0;
 	initial	cmd_output = 1'b0;
 	always @(posedge i_clk)
@@ -304,29 +351,8 @@ module wbhyperram(i_clk, i_reset,
 		cmd_output <= (cmd_ctr > 1);
 	end
 
-	reg	r_stall;
-	initial	r_stall = 1'b1;
-	always @(posedge i_clk)
-	if ((i_reset)||(maintenance_stall))
-		r_stall <= 1'b1;
-	else if (!i_wb_cyc)
-		r_stall <= (!o_hram_csn)&&(CK_RWR_STALL > 0);
-	else if ((o_hram_csn)&&(rwr_stall))
-		r_stall <= 1'b1;
-	else if (chip_select_warning)
-		r_stall <= 1'b1;
-	else if (bus_stb)
-		r_stall <= 1'b1;
-	else if ((pipe_req)&&(state_ctr == 2))
-		r_stall <= 1'b0;
-	else if ((cmd_ctr>0)||(state_ctr > 1))
-		r_stall <= 1'b1;
-	else
-		r_stall <= 1'b0;
-
-	always @(*)
-		o_wb_stall = (r_stall)&&(!pipe_req);
-
+	// Command data output
+	//
 	always @(posedge i_clk)
 	if (bus_stb)
 		cmd_reg <= { (!i_wb_we), dev_addr, 1'b1,
@@ -335,8 +361,9 @@ module wbhyperram(i_clk, i_reset,
 	else
 		cmd_reg <= { cmd_reg[31:0], 16'h00 };
 
+	//////////////////////////
 	//
-	//
+	// Read/write state counter output
 	//
 	//
 	initial	state_ctr = 0;
@@ -347,34 +374,18 @@ module wbhyperram(i_clk, i_reset,
 		state_ctr <= 1;
 	else if (cmd_output)
 	begin
-		casez({(i_hram_rwds||OPT_FIXED_LATENCY), cti_dev, cti_write})
-		3'b0?0: state_ctr <= 2 + LATENCY_COUNT;
-		3'b001: state_ctr <= 1 + LATENCY_COUNT;
+		casez({(i_hram_rwds||fixed_latency), cti_dev, cti_write})
+		3'b0?0: state_ctr <= 2 + { 1'b0, latency };
+		3'b001: state_ctr <= 1 + { 1'b0, latency };
 		3'b?11: state_ctr <= 1;
-		3'b1?0: state_ctr <= 2 + 2*LATENCY_COUNT;
-		3'b101: state_ctr <= 1 + 2*LATENCY_COUNT;
+		3'b1?0: state_ctr <= 2 + { latency, 1'b0 };
+		3'b101: state_ctr <= 1 + { latency, 1'b0 };
 		default: state_ctr <= 1;
 		endcase
 	end else if (pipe_stb)
 		state_ctr <= 2;
 	else if (state_ctr > 0)
 		state_ctr <= state_ctr - 1'b1;
-
-	initial	write_ctr = 0;
-	always @(posedge i_clk)
-	if ((i_reset)||(!i_wb_cyc))
-		write_ctr <= 0;
-	else if ((start_stb)&&(write_stb))
-		write_ctr <= 1;
-	else if ((OPT_PIPE)&&(write_stb))
-		write_ctr <= 2;
-	else if (!cti_write)
-		write_ctr <= 0;
-	else if ((cmd_output)&&(!cti_dev))
-		write_ctr <= 1 + (((OPT_FIXED_LATENCY)||(i_hram_rwds))
-				? 2 * LATENCY_COUNT : LATENCY_COUNT);
-	else if ((!cmd_output)&&(write_ctr > 0))
-		write_ctr <= write_ctr - 1'b1;
 
 	reg	write_data_shift;
 	always @(posedge i_clk)
@@ -394,6 +405,38 @@ module wbhyperram(i_clk, i_reset,
 		data_mask <= { data_mask[1:0], 2'b00 };
 	end
 
+	reg	cfg_write;
+	always @(posedge i_clk)
+	if (!i_wb_cyc)
+		cfg_write <= 1'b0;
+	else if ((start_stb)&&(dev_addr)&&(i_wb_we)&&(i_wb_addr[AW-1:0]==0))
+		cfg_write <= 1'b1;
+	else if (bus_stb)
+		cfg_write <= 1'b0;
+
+	initial latency = DEFAULT_LATENCY_COUNT;
+	initial fixed_latency = 1'b1;
+	always @(posedge i_clk)
+	if (!o_hram_reset_n)
+	begin
+		latency <= DEFAULT_LATENCY_COUNT;
+		fixed_latency <= 1'b1;
+	end else if ((!o_hram_csn)&&(!cmd_output)&&(cfg_write))
+	begin
+		latency <= DEFAULT_LATENCY_COUNT;
+		fixed_latency <= 1'b1;
+		//
+		case(data_reg[7:4])
+		4'h0: latency <= 5;
+		4'h1: latency <= 6;
+		4'he: latency <= 3;
+		4'hf: latency <= 4;
+		endcase
+
+		if (AW <= 22)
+			fixed_latency <= data_reg[3];
+	end
+
 	initial	o_hram_drive_data = 1'b1;
 	always @(posedge i_clk)
 	if ((i_reset)||(!i_wb_cyc))
@@ -408,31 +451,6 @@ module wbhyperram(i_clk, i_reset,
 		// Bus cycle is over
 		o_hram_drive_data <= 1'b1;
 
-	//
-	//
-	// read_ctr is a count down timer counting down until
-	// a read is complete.  The actual read takes place when
-	// read_ctr == 2 or read_ctr == 1
-	//
-	initial	read_ctr = 0;
-	always @(posedge i_clk)
-	if ((i_reset)||(!i_wb_cyc))
-		read_ctr <= 0;
-	else if ((start_stb)&&(read_stb))
-		read_ctr <= 1;
-	else if ((cmd_output)&&(!cti_write))
-	begin
-		// Need to wait LATENCY_COUNT-1, possibly LATENCY_COUNT*2-1
-		// clocks from the end of the cmd_output before the first
-		// read, at read_ctr == 2
-		if ((OPT_FIXED_LATENCY)||(i_hram_rwds))
-			read_ctr <= 2 + 2*LATENCY_COUNT;
-		else
-			read_ctr <= 2 + LATENCY_COUNT;
-	end else if (read_stb)
-		read_ctr <= 2;
-	else if (read_ctr > 0)
-		read_ctr <= read_ctr - 1'b1;
 
 	initial	o_wb_ack = 1'b0;
 	always @(posedge i_clk)
@@ -450,14 +468,14 @@ module wbhyperram(i_clk, i_reset,
 	//
 	// Control the direction of the rwds signal
 	//
-	initial	o_hram_rwctrl = RWDS_LCL;
+	initial	o_hram_rwctrl = RWDS_OUT;
 	always @(posedge i_clk)
 	if ((i_reset)||(!i_wb_cyc))
-		o_hram_rwctrl <= RWDS_LCL;
+		o_hram_rwctrl <= RWDS_OUT;
 	else if ((start_stb)||(cmd_output)||(!cti_write)||(cti_dev))
-		o_hram_rwctrl <= RWDS_INPT;
+		o_hram_rwctrl <= RWDS_IN;
 	else
-		o_hram_rwctrl <= RWDS_LCL;
+		o_hram_rwctrl <= RWDS_OUT;
 
 	always @(*)
 		o_hram_rwds = (write_data_shift) ? (~data_mask[3:2]) : (2'b00);
@@ -472,11 +490,21 @@ module wbhyperram(i_clk, i_reset,
 	assign	unused = { mem_addr, cti_dev };
 	// Verilator lint_on  UNUSED
 
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
 `ifdef	FORMAL
-	parameter [0:0]	F_OPT_COVER = 1'b0;
 
-	initial	assert(LATENCY_COUNT >= MIN_LATENCY_COUNT);
-	initial	assert(LATENCY_COUNT <= DEFAULT_LATENCY_COUNT);
+	always @(*)
+	begin
+		assert(latency >= MIN_LATENCY_COUNT);
+		assert(latency <= DEFAULT_LATENCY_COUNT);
+	end
 
 	reg	f_past_valid;
 	initial	f_past_valid = 1'b0;
@@ -493,12 +521,69 @@ module wbhyperram(i_clk, i_reset,
 	wire	[(F_LGDEPTH-1):0]	f_nreqs, f_nacks, f_outstanding;
 
 	fwb_slave #(.AW(AW+1), .DW(DW), .F_MAX_STALL(26), .F_MAX_ACK_DELAY(25),
-			.F_LGDEPTH(3), .F_MAX_REQUESTS(0))
+			.F_LGDEPTH(F_LGDEPTH), .F_MAX_REQUESTS(0))
 		busproperties(i_clk, i_reset,
 			i_wb_cyc, i_wb_stb, i_wb_we, i_wb_addr, i_wb_data,
 				i_wb_sel,
 			o_wb_ack, o_wb_stall, o_wb_data, 1'b0,
 			f_nreqs, f_nacks, f_outstanding);
+
+	wire	[31:0]		fvh_vcs_count, fvh_rp_count, fvh_csm_count;
+	wire	[15:0]		fv_cfgword, fv_data;
+	wire	[AW:0]		fv_addr;
+
+	f_hyperram #(.AW(AW+1), .CLOCK_SPEED_HZ(CLOCK_RATE_HZ))
+		hyperramp(i_clk,
+			o_hram_reset_n, o_hram_cke, o_hram_csn,
+			o_hram_rwctrl, o_hram_rwds, i_hram_rwds,
+			o_hram_drive_data,
+				o_hram_data, i_hram_data,
+			fv_addr, fv_data,
+			fvh_vcs_count, fvh_rp_count, fvh_csm_count,
+			fv_cfgword);
+
+	always @(*)
+	if (!o_hram_csn)
+		assert((chip_select_count == fvh_csm_count[CSM_BITS-1:0])
+			&&(fvh_csm_count[31:CSM_BITS]==0));
+
+	always @(posedge i_clk)
+	if ((!f_past_valid)||($past(!o_hram_reset_n)))
+	begin
+		assert(reset_recovery == CK_VCS);
+		assert(fvh_vcs_count == 0);
+	end else if (o_hram_reset_n) begin
+		if (fvh_vcs_count > CK_VCS)
+			assert(reset_recovery == 0);
+		else
+			assert(reset_recovery == (CK_VCS-fvh_vcs_count));
+	end
+
+	always @(*)
+	case(fv_cfgword[7:4])
+	4'h0: assert(latency == 3'h5);
+	4'h1: assert(latency == 3'h6);
+	4'he: assert(latency == 3'h3);
+	4'hf: assert(latency == 3'h4);
+	endcase
+
+	always @(*)
+	assert(fixed_latency == fv_cfgword[3]);
+
+	always @(*)
+	if ((!o_hram_csn)&&(cmd_output))
+	begin
+		if ((!cti_write)||(!cti_dev))
+			assert(cfg_write == 0);
+		else if (fv_cmd[44:0] != 0)
+			assert(cfg_write == 0);
+		else
+			assert(cfg_write);
+	end
+
+	always @(*)
+	if (maintenance_stall)
+		assume(!i_wb_cyc);
 
 	always @(*)
 	if ((i_wb_cyc)&&(!o_hram_csn))
@@ -506,37 +591,20 @@ module wbhyperram(i_clk, i_reset,
 	else
 		assert((f_outstanding == 0)||(o_wb_ack));
 
-always @(*)
-assert(cmd_output == (cmd_ctr != 0));
-always @(*)
-if ((cti_write)&&(write_ctr == 0))
-assert(o_hram_csn);
+	always @(*)
+		assert(cmd_output == (cmd_ctr != 0));
+	always @(*)
+	if (state_ctr == 0)
+		assert(o_hram_csn);
 
-always @(*)
-if ((pipe_stb)&&(read_stb))
-assert(read_ctr == 1);
-
-always @(*)
-if ((pipe_stb)&&(write_stb))
-assert(write_ctr == 1);
-
+	always @(*)
+	if (pipe_stb)
+		assert(state_ctr == 1);
 
 
 	always @(*)
 	if (o_wb_ack)
-		assert((read_ctr == 0)||(read_ctr == 2)
-			||(write_ctr == 0)||(write_ctr == 2));
-
-	always @(posedge i_clk)
-	if (state_ctr == 0)
-	begin
-		assert(write_ctr == 0);
-		assert(read_ctr  == 0);
-	end else if (state_ctr < 4)
-	begin
-		assert((read_ctr == state_ctr)
-			||(write_ctr == state_ctr));
-	end
+		assert((state_ctr == 0)||(state_ctr == 2));
 
 	always @(posedge i_clk)
 	if (i_wb_cyc)
@@ -551,17 +619,12 @@ assert(write_ctr == 1);
 		if (f_outstanding == 2)
 			assert((OPT_PIPE)&&(o_wb_ack));
 
-		if ((read_ctr == 0)&&(write_ctr == 0))
+		if (state_ctr == 0)
 			assert((o_wb_ack)||(f_outstanding == 0));
 
-		if ((read_ctr == 1)||(write_ctr == 1))
+		if (state_ctr == 1)
 			assert(f_outstanding == 1);
 	end
-
-	always @(*)
-	if (!cmd_output)
-		assert((write_ctr == 0)||(read_ctr == 0));
-
 
 	generate if (F_OPT_COVER)
 	begin : GEN_COVER
@@ -577,12 +640,12 @@ assert(write_ctr == 1);
 		assume($stable(i_hram_rwds));
 
 	always @(*)
-	if (o_hram_rwctrl == RWDS_LCL)
+	if (o_hram_rwctrl == RWDS_OUT)
 		assume(i_hram_rwds == o_hram_rwds);
 
 	always @(*)
 	if ((!o_hram_csn)&&(cti_dev))
-		assert(o_hram_rwctrl == RWDS_INPT);
+		assert(o_hram_rwctrl == RWDS_IN);
 
 	always @(posedge i_clk)
 	if ((f_past_valid)&&(($past(i_reset))||($past(!i_wb_cyc))))
@@ -625,6 +688,9 @@ assert(write_ctr == 1);
 		assert(start_stb);
 
 	always @(posedge i_clk)
+		cover(maintenance_stall == 1'b0);
+
+	always @(posedge i_clk)
 	if (o_wb_ack)
 	begin
 		cover(!cti_write);
@@ -641,10 +707,11 @@ assert(write_ctr == 1);
 		always @(posedge i_clk)
 		if (f_past_valid)
 		begin
+
 		cover(($past(pipe_stb,3))&&($past(pipe_stb)) &&  cti_write);
 		cover(($past(pipe_stb,3))&&($past(pipe_stb)) && !cti_write);
 		cover((i_wb_stb)&&(chip_select_warning));
-		cover(chip_select_count == 50);
+		cover(chip_select_count == (CK_CSM[CSM_BITS-1:0]-6));
 		cover(pipe_req);
 		cover(pipe_stb);
 		end
@@ -661,7 +728,7 @@ assert(write_ctr == 1);
 	sequence	COMMAND_SEQ;
 		((o_wb_stall)&&(!o_hram_csn)&&(cmd_output)
 			&&(o_hram_drive_data)&&(o_hram_cke)
-			&&(o_hram_rwctrl==RWDS_INPT) throughout
+			&&(o_hram_rwctrl==RWDS_IN) throughout
 		(o_hram_data == fv_cmd[47:32])&&(cmd_ctr == 3)
 		##1 (o_hram_data == fv_cmd[31:16])&&(cmd_ctr == 2)
 		##1 (o_hram_data == fv_cmd[15: 0])&&(cmd_ctr == 1));
@@ -670,31 +737,31 @@ assert(write_ctr == 1);
 	sequence	DEV_WRITE_SEQ;
 		((!o_hram_csn)&&(cti_write)&&(cti_dev)&&(!cmd_output)
 			&&(o_hram_drive_data)&&(o_hram_cke)
-			&&(o_hram_rwctrl==RWDS_INPT)
+			&&(o_hram_rwctrl==RWDS_IN)
 		&&(o_hram_data == fv_data[15:0])
-			&&(write_ctr == 1)&&(o_wb_stall))
+			&&(state_ctr == 1)&&(o_wb_stall))
 		##1 (o_wb_ack)&&(o_hram_csn);
 	endsequence
 
 	sequence	WRITE_WORD_SEQ;
 		(((!o_hram_csn)&&(cti_write)&&(!cti_dev)&&(!cmd_output)
 			&&(o_hram_drive_data)&&(o_hram_cke)
-			&&(o_hram_rwctrl==RWDS_LCL)) throughout
+			&&(o_hram_rwctrl==RWDS_OUT)) throughout
 		(o_hram_data == fv_data[31:16])
-			&&(o_hram_rwds == (~fv_sel[3:2]))&&(write_ctr == 2)
+			&&(o_hram_rwds == (~fv_sel[3:2]))&&(state_ctr == 2)
 			&&(o_wb_stall)
 		##1 (o_hram_data == fv_data[15:0])
-			&&(o_hram_rwds == (~fv_sel[1:0]))&&(write_ctr == 1)
+			&&(o_hram_rwds == (~fv_sel[1:0]))&&(state_ctr == 1)
 			&&((o_wb_stall)||(OPT_PIPE)));
 	endsequence
 
 	sequence	READ_WORD_SEQ;
 		(((!o_hram_csn)&&(!cti_write)&&(!cmd_output)
 			&&(!o_hram_drive_data)&&(o_hram_cke)
-			&&(o_hram_rwctrl==RWDS_INPT)) throughout
-		(read_ctr == 2)&&(o_wb_stall)
+			&&(o_hram_rwctrl==RWDS_IN)) throughout
+		(state_ctr == 2)&&(o_wb_stall)
 		##1 (o_wb_data[15:0] == $past(i_hram_data[15:0]))
-			&&(read_ctr == 1)
+			&&(state_ctr == 1)
 			&&((o_wb_stall)||(OPT_PIPE)));
 	endsequence
 
@@ -717,9 +784,9 @@ assert(write_ctr == 1);
 	assert property (@(posedge i_clk)
 		disable iff ((i_reset)||(!i_wb_cyc))
 		(start_stb)&&(write_stb)&&(!dev_addr)
-		##1(((i_hram_rwds)||(OPT_FIXED_LATENCY)) throughout COMMAND_SEQ)
-		|=> (o_hram_rwctrl == RWDS_INPT)
-		##1 (o_hram_rwds == 2'b11)&&(o_hram_rwctrl == RWDS_LCL)
+		##1(((i_hram_rwds)||(fixed_latency)) throughout COMMAND_SEQ)
+		|=> (o_hram_rwctrl == RWDS_IN)
+		##1 (o_hram_rwds == 2'b11)&&(o_hram_rwctrl == RWDS_OUT)
 			&&(data_reg  == fv_data)
 			&&(data_mask == fv_sel)
 			[*2*LATENCY_COUNT-2]
@@ -732,10 +799,10 @@ assert(write_ctr == 1);
 	assert property (@(posedge i_clk)
 		disable iff ((i_reset)||(!i_wb_cyc))
 		(start_stb)&&(write_stb)&&(!dev_addr)
-		##1 (((!i_hram_rwds)&&(!OPT_FIXED_LATENCY))
+		##1 (((!i_hram_rwds)&&(!OPT_fixed_latency))
 				throughout COMMAND_SEQ)
-		|=> (!o_hram_csn)&&(o_hram_rwctrl == RWDS_INPT)
-		##1 (!o_hram_csn)&&(o_hram_rwctrl == RWDS_LCL)
+		|=> (!o_hram_csn)&&(o_hram_rwctrl == RWDS_IN)
+		##1 (!o_hram_csn)&&(o_hram_rwctrl == RWDS_OUT)
 			&&(o_hram_rwds == 2'b11)
 			[*(LATENCY_COUNT-2)]
 		##1 ((!o_wb_ack) throughout WRITE_WORD_SEQ)
@@ -747,7 +814,7 @@ assert(write_ctr == 1);
 	assert property (@(posedge i_clk)
 		disable iff ((i_reset)||(!i_wb_cyc))
 		(pipe_stb)&&(write_stb)
-		|-> (write_ctr == 1)&&(!dev_addr)
+		|-> (state_ctr == 1)&&(!dev_addr)
 		##1 WRITE_WORD_SEQ
 		##1 (o_wb_ack)&&(
 			(o_hram_csn)
@@ -758,15 +825,15 @@ assert(write_ctr == 1);
 	assert property (@(posedge i_clk)
 		disable iff ((i_reset)||(!i_wb_cyc))
 		((start_stb)&&(read_stb))
-		##1(((!i_hram_rwds)&&(!OPT_FIXED_LATENCY)) throughout COMMAND_SEQ)
+		##1(((!i_hram_rwds)&&(!fixed_latency)) throughout COMMAND_SEQ)
 		|=> (!o_hram_csn)&&(o_hram_cke)
-			&&(o_hram_rwctrl == RWDS_INPT)
+			&&(o_hram_rwctrl == RWDS_IN)
 		##1 (!o_hram_csn)&&(o_hram_cke)&&(!o_hram_drive_data)
-			&&(read_ctr > 3)
-			&&(o_hram_rwctrl == RWDS_INPT) [*(LATENCY_COUNT-3+1)]
+			&&(state_ctr > 3)
+			&&(o_hram_rwctrl == RWDS_IN) [*(LATENCY_COUNT-3+1)]
 		##1 (!o_hram_csn)&&(o_hram_cke)&&(!o_hram_drive_data)
-			&&(read_ctr == 3)
-			&&(o_hram_rwctrl == RWDS_INPT)
+			&&(state_ctr == 3)
+			&&(o_hram_rwctrl == RWDS_IN)
 		##1 ((!o_wb_ack) throughout READ_WORD_SEQ)
 		##1 (o_wb_ack)&&(o_wb_data[31:16] == $past(i_hram_data,2))
 			&&(o_wb_data[15:0] == $past(i_hram_data))
@@ -777,15 +844,15 @@ assert(write_ctr == 1);
 	assert property (@(posedge i_clk)
 		disable iff ((i_reset)||(!i_wb_cyc))
 		((start_stb)&&(read_stb))
-		##1 ((i_hram_rwds)||(OPT_FIXED_LATENCY) throughout COMMAND_SEQ)
+		##1 ((i_hram_rwds)||(fixed_latency) throughout COMMAND_SEQ)
 		|=> (!o_hram_csn)&&(o_hram_cke)
-			&&(o_hram_rwctrl == RWDS_INPT)
+			&&(o_hram_rwctrl == RWDS_IN)
 		##1 (!o_hram_csn)&&(o_hram_cke)&&(!o_hram_drive_data)
-			&&(read_ctr > 3)
-			&&(o_hram_rwctrl == RWDS_INPT) [*(2*LATENCY_COUNT-3+1)]
+			&&(state_ctr > 3)
+			&&(o_hram_rwctrl == RWDS_IN) [*(2*LATENCY_COUNT-3+1)]
 		##1 (!o_hram_csn)&&(o_hram_cke)&&(!o_hram_drive_data)
-			&&(read_ctr == 3)
-			&&(o_hram_rwctrl == RWDS_INPT) 
+			&&(state_ctr == 3)
+			&&(o_hram_rwctrl == RWDS_IN) 
 		##1 ((!o_wb_ack) throughout READ_WORD_SEQ)
 		##1 (o_wb_ack)&&(o_wb_data[31:16] == $past(i_hram_data,2))
 			&&(o_wb_data[15:0] == $past(i_hram_data))
@@ -796,12 +863,22 @@ assert(write_ctr == 1);
 	assert	property (@(posedge i_clk)
 		disable iff ((i_reset)||(!i_wb_cyc))
 		((pipe_stb)&&(read_stb))
-		|-> (read_ctr == 1)
+		|-> (state_ctr == 1)
 		##1 READ_WORD_SEQ
 		##1 (o_wb_ack)&&(o_wb_data[31:16] == $past(i_hram_data,2))
 			&&(o_wb_data[15:0] == $past(i_hram_data))
 			&&((o_hram_csn)||((OPT_PIPE)&&($past(read_stb)))));
 
 `endif	// VERIFIC
+
+
+	always @(*)
+	if ((start_stb)&&(dev_addr)&&(i_wb_we)&&(i_wb_addr==0))
+	begin
+		assume(i_wb_data[11:8] == 4'hf);
+		assume((i_wb_data[7:5] == 3'b000)||(i_wb_data[7:5] == 3'b111));
+	end
+	always @(*)
+		assume(latency >= MIN_LATENCY_COUNT);
 `endif	// FORMAL
 endmodule
