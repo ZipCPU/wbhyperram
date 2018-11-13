@@ -47,13 +47,45 @@
 @PTYPE=MEMORY
 @LD.PERM=wx
 @TOP.PORTLIST=
-	o_@$(PREFIX)_reset_n, o_@$(PREFIX)_ck,
+		// HyperRAM
+		o_@$(PREFIX)_reset_n, o_@$(PREFIX)_ck,
 			o_@$(REFIX)_csn, io_@$(PREFIX)_rwds,
 			io_@$(PREFIX)_data
 @TOP.IODECL=
-	o_@$(PREFIX)_reset_n, o_@$(PREFIX)_ck,
-			o_@$(REFIX)_csn, io_@$(PREFIX)_rwds,
-			io_@$(PREFIX)_data
+	// HyperRAM
+	output	wire		o_@$(PREFIX)_reset_n;
+	output	wire [1:0]	o_@$(PREFIX)_ck;
+	output	wire		o_@$(REFIX)_csn;
+	inout	wire [1:0]	io_@$(PREFIX)_rwds;
+	inout	wire [7:0]	io_@$(PREFIX)_data;
+@TOP.MAIN=
+		// HyperRAM
+		o_@$(PREFIX)_reset_n, w_@$(PREFIX)_cke,
+			o_@$(REFIX)_csn, w_@$(PREFIX)_rwctrl,
+		o_@$(PREFIX)_rwds, i_@$(PREFIX)_rwds,
+		w_@$(PREFIX)_drive, o_@$(PREFIX)_data, i_@$(PREFIX)_data
+@TOP.DECL=
+	// HyperRAM
+	wire		w_@$(PREFIX)_cke;
+	wire		w_@$(PREFIX)_rwctrl;
+	wire	[1:0]	o_@$(PREFIX)_rwds, i_@$(PREFIX)_rwds;
+	wire		w_@$(PREFIX)_drive;
+	wire	[7:0]	o_@$(PREFIX)_data, i_@$(PREFIX)_data;
+	wire		s_@$(PREFIX)_xck;
+@TOP.INSERT=
+	// HyperRAM
+
+	genvar @$(PREFIX)_gen;
+	generate for(@$(PREFIX)_gen = 0;
+		@$(PREFIX)_en < 8; @$(PREFIX)_gen = @$(PREFIX)_gen + 1)
+	begin : @$(DEVID)_DATAIO
+
+		xioddr @$(PREFIX)_iod(s_@$(PREFIX)_xck, w_@$(PREFIX)_drive,
+			o_@$(PREFIX)_data[0], i_@$(PREFIX)_data[0],
+			io_@$(PREFIX)_data[0]);
+	end endgenerate
+
+
 @MAIN.PORTLIST=
 	o_@$(PREFIX)_reset_n, o_@$(PREFIX)_cke,
 			o_@$(REFIX)_csn, o_@$(PREFIX)_rwctrl,
@@ -82,7 +114,7 @@
 			o_@$(PREFIX)_rwctrl, o_@$(PREFIX)_rwds,
 			i_@$(PREFIX)_rwds, o_@$(PREFIX)_drive,
 			i_@$(PREFIX)_data, o_@$(PREFIX)_data);
-		
+
 @REGS.N=1
 @REGS.0= 0 R_@$(DEVID) @$(DEVID)
 @REGDEFS.H.DEFNS=
