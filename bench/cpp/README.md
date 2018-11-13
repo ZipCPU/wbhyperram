@@ -1,0 +1,1 @@
+This directory contains the Verilator based [HyperRAM simulation class](wbhyperramsim.cpp).  Including this in your design should make it possible for a Verilator based simulation of a design to function as though a HyperRAM were connected.
