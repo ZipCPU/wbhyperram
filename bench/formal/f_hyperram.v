@@ -44,20 +44,22 @@
 `ifdef	FORMAL
 //
 module f_hyperram(i_clk, 
-		i_reset_n, i_cke, i_csn,
-		i_rwctrl, i_rw_out, i_rw_in,
-		i_dq_we, i_dq_out, i_dq_in,
-		o_fv_addr, o_fv_data,
+		i_reset_n, i_cke,    i_csn,
+		i_rwctrl,  i_rw_out, i_rw_in,
+		i_dq_we,   i_dq_out, i_dq_in,
+		o_fv_cmd, o_fv_addr,  o_fv_data,
 		o_vcs_count, o_rp_count, o_csm_count,
 		o_cfgword);
 	parameter	CLOCK_SPEED_HZ =   100_000_000;
 	parameter	AW = 22;
+	parameter	IODELAY = 22;
 	//
 	input	wire	i_clk;
 	input	wire	i_reset_n, i_cke, i_csn, i_rwctrl;
 	input	wire	[1:0]	i_rw_out, i_rw_in;
 	input	wire		i_dq_we;
 	input	wire	[15:0]	i_dq_out, i_dq_in;
+	output	reg	[47:0]	o_fv_cmd;
 	output	reg	[AW-1:0] o_fv_addr;
 	output	reg	[15:0]	o_fv_data;
 	output	reg	[31:0]	o_vcs_count, o_rp_count, o_csm_count;
@@ -96,6 +98,48 @@ module f_hyperram(i_clk,
 	reg	f_past_valid = 0;
 	always @(posedge i_clk)
 		f_past_valid = 1'b1;
+
+	/////////////////////////////////////////////
+	//
+	// Delay the high speed IO lines
+	//
+	reg		dly_cke;
+	reg	[1:0]	dly_rw_out;
+	reg	[15:0]	dly_dq_out;
+	generate if (IODELAY == 0)
+	begin
+
+		always @(*)
+		begin
+			dly_cke     = i_cke;
+			dly_rw_out  = i_rw_out;
+			dly_dq_out  = i_dq_out;
+		end
+
+	end else if (IODELAY == 1)
+	begin
+
+		always @(posedge i_clk)
+		begin
+			dly_cke    <= i_cke;
+			dly_rw_out <= i_rw_out;
+			dly_dq_out <= i_dq_out;
+		end
+
+	end else begin
+
+		reg	[IODELAY-2:0]		pipe_cke;
+		reg	[2*(IODELAY-1):0]	pipe_rw_out;
+		reg	[16*(IODELAY-1):0]	pipe_dq_out;
+
+		always @(posedge i_clk)
+		begin
+			{ dly_cke, pipe_cke } <= { pipe_cke, i_cke };
+			{ dly_rw_out, pipe_rw_out} <= { pipe_rw_out, i_rw_out };
+			{ dly_dq_out, pipe_dq_out }<= { pipe_dq_out, i_dq_out };
+		end
+
+	end endgenerate
 
 	/////////////////////////////////////////////
 	//
@@ -173,7 +217,7 @@ module f_hyperram(i_clk,
 	always @(posedge i_clk)
 	if (i_csn)
 		start_count <= 0;
-	else if ((!i_csn)&&(i_cke)&&(!(&start_count)))
+	else if ((!i_csn)&&(dly_cke)&&(!(&start_count)))
 		start_count <= start_count + 1'b1;
 
 	/////////////////////////////////////////////
@@ -184,20 +228,20 @@ module f_hyperram(i_clk,
 	reg		double_latency;
 
 	always @(posedge i_clk)
-	if ((i_cke)&&(!i_csn))
+	if ((dly_cke)&&(!i_csn))
 	begin
 		if (start_count == 0)
 		begin
-			fv_cmd[47:32] <= i_dq_out;
+			fv_cmd[47:32] <= dly_dq_out;
 
 			// While the chip supports wrapped burst mode, this
 			// property set only includes linear burst mode
-			assert(i_dq_out[13]);
+			assert(dly_dq_out[13]);
 		end
 		if (start_count == 1)
-			fv_cmd[31:16] <= i_dq_out;
+			fv_cmd[31:16] <= dly_dq_out;
 		if (start_count == 2)
-			fv_cmd[15: 0] <= i_dq_out;
+			fv_cmd[15: 0] <= dly_dq_out;
 
 		if (start_count < 3)
 			assert((i_dq_we)&&(!i_rwctrl));
@@ -216,8 +260,9 @@ module f_hyperram(i_clk,
 
 	always @(*)
 	if (i_rwctrl)
-		assume(i_rw_in == i_rw_out);
+		assume(i_rw_in == dly_rw_out);
 
+	assign	o_fv_cmd = fv_cmd;
 	/////////////////////////////////////////////
 	//
 	// Handle the latency writes
@@ -228,7 +273,7 @@ module f_hyperram(i_clk,
 	always @(posedge i_clk)
 	if (!i_reset_n)
 		o_cfgword <= 16'b1000_1111_0001_1111;
-	else if ((i_cke)&&(!i_csn)&&(start_count == 3))
+	else if ((dly_cke)&&(!i_csn)&&(start_count == 3))
 	begin
 		devwrite = (fv_cmd[47:46] == 2'b01);
 		devwrite = (devwrite) && (fv_cmd[44:0] == 0);
@@ -238,14 +283,14 @@ module f_hyperram(i_clk,
 
 		if (devwrite)
 		begin
-			o_cfgword <= i_dq_out;
-			assert(i_dq_out[11:8] == 4'hf);
+			o_cfgword <= dly_dq_out;
+			assert(dly_dq_out[11:8] == 4'hf);
 		end
 
 		if (AW > 22)
 			o_cfgword[3] <= 1'b1;
 
-		// fixed_latency <= (AW <= 22) ? i_dq_out[3] : 1'b1;
+		// fixed_latency <= (AW <= 22) ? dly_dq_out[3] : 1'b1;
 	end
 
 	always @(*)
@@ -295,7 +340,8 @@ module f_hyperram(i_clk,
 	//
 	// Active transaction
 	//
-	reg	read_stall;
+	reg		read_stall;
+	reg	[2:0]	stall_count;
 
 	initial	counts_till_active = 12;
 	always @(posedge i_clk)
@@ -303,7 +349,9 @@ module f_hyperram(i_clk,
 		counts_till_active = 2*latency;
 	else if (start_count == 1)
 	begin
-		if (double_latency)
+		if (fv_cmd[47:46]==2'b00)
+			counts_till_active <= 3;
+		else if (double_latency)
 			counts_till_active <= latency * 2;
 		else
 			counts_till_active <= latency;
@@ -311,15 +359,35 @@ module f_hyperram(i_clk,
 		counts_till_active <= counts_till_active - 1;
 
 	always @(posedge i_clk)
-	if ((counts_till_active == 1)&&(cmd_write))
-		assert((i_rwctrl)&&(i_rw_out == 2'b00));
+	if ((!i_csn)&&(counts_till_active == 1)&&(cmd_write))
+		assert((i_rwctrl)&&(dly_rw_out == 2'b00));
+
+	always @(*)
+	if ((counts_till_active == 0)&&(!i_csn))
+		assume((i_rwctrl)||(i_rw_in[0] == 0));
+
 
 	always @(*)
 		read_stall = (!i_csn)&&(cmd_read)&&(!i_rwctrl)&&(!i_rw_in[1]);
 
+	always @(posedge i_clk)
+	if ((f_past_valid)&&($past(read_stall))&&(!i_csn))
+		assume(i_rw_in[1]);
+
 	always @(*)
 		active = (counts_till_active == 0)
-			&&(!i_csn)&&(!read_stall)&&(i_cke);
+			&&(!i_csn)&&(!read_stall)&&(dly_cke);
+
+	initial	stall_count = 0;
+	always @(posedge i_clk)
+	if ((i_csn)||(cmd_write))
+		stall_count <= 0;
+	else if ((counts_till_active == 0)&&(dly_cke)&&(i_rw_in==2'b00))
+		stall_count <= stall_count + 1'b1;
+
+	always @(*)
+	if ((&stall_count)&&(!i_csn)&&(counts_till_active == 0)&&(!cmd_write))
+		assume(i_rw_in == 2'b10);
 
 	always @(*)
 	if (active)
@@ -333,10 +401,10 @@ module f_hyperram(i_clk,
 	always @(posedge i_clk)
 	if ((active)&&(cmd_write)&&(!cmd_dev)&&(mem_addr == o_fv_addr))
 	begin
-		if (!i_rw_out[0])
-			o_fv_data[15: 8] <= i_dq_out[15:8];
-		if (!i_rw_out[1])
-			o_fv_data[ 7: 0] <= i_dq_out[ 7:0];
+		if (!dly_rw_out[0])
+			o_fv_data[15: 8] <= dly_dq_out[15:8];
+		if (!dly_rw_out[1])
+			o_fv_data[ 7: 0] <= dly_dq_out[ 7:0];
 	end
 
 endmodule
