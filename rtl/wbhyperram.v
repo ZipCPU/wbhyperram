@@ -4,21 +4,12 @@
 //
 // Project:	WB-HyperRAM, a wishbone controller for a hyperRAM interface
 //
-// Purpose:	
-//
-//	Check	tRWR (Read-write recovery)
-//	Host may stop RWDS to handle crossing memory boundaries
-//	Must the clock idle before CS# high? (sec 3.3)
-//	Can the clock be made to be free running?
-//	Check maximum write burst length (configuration register 0?)
-//	Check DPDOUT as part of the reset sequence
-//	tCMD, or rather CK_CMS, is 4us -- not 1us
-//	Check tCSM? (maximum CS# active time)
-//	Check tVCS (reset to standby?)
-//
-//	RESET pulse must be low for tRP > 200ns
-//	Following RESET#, CS must be high for tVCS = 150us
-//
+// Purpose:	Provides a WB interface to a HyperRAM chip, such as the
+// 		S27KL0641, S27KS0641, S70KL1281, or S70KS1281 chips from
+// 	Cypress.  The controller is designed for 100MHz operation, and to
+// 	use DDR I/O (external to this module).  Hence the 8-bit data interface
+// 	requires 16-data bits, and the 1-bit RWDS interface requires two bits.
+// 	The 90-degree offset clock is assumed to be provided from elsewhere. 
 //
 // Creator:	Dan Gisselquist, Ph.D.
 //		Gisselquist Technology, LLC
@@ -65,10 +56,26 @@ module wbhyperram(i_clk, i_reset,
 	parameter	AW= 23-2; // 8MB
 	parameter	CLOCK_RATE_HZ = 100_000_000;
 	//
+	// If we exploit WB/B4/pipeline, then we can allow a second request
+	// before the first has been completed.  If this second request
+	// direction remains unchanged, and if the address is for the next
+	// address in memory, then we can keep the operation going and only
+	// require two additional clocks per access, rather than starting up
+	// all over again.
 	parameter [0:0]	OPT_PIPE  = 1'b1;
-	parameter	IODELAY = 1;
+	//
+	// Many vendor I/O DDR primitives will have a delay associated with
+	// them.  This IODELAY primitive allows you to specify that delay.
+	// This is important for making certain that o_hram_csn (which isn't
+	// delayed) doesn't get dropped before the transaction is complete.
+	parameter	IODELAY = 0;
 	//
 `ifdef	FORMAL
+	//
+	// In order to cover various parts of this design, we'll modify
+	// the design subtly to allow (for example) the reset cycle to
+	// complete earlier.  Only used in FORMAL mode, and only if
+	// F_OPT_COVER is set.
 	parameter [0:0]	F_OPT_COVER = 1'b0;
 `endif
 	//
@@ -95,6 +102,8 @@ module wbhyperram(i_clk, i_reset,
 			CK_CSM = 4_000 / CLOCK_PERIOD_NS;
 `endif
 	// localparam	CK_RWR_STALL = (CK_RWR>3) ? (CK_RWR-3) : 0;
+	//
+	// I really need to learn to use $clog2
 	localparam	CSM_BITS = (CK_CSM > 255) ? 9
 				: ((CK_CSM > 127) ? 8
 				: ((CK_CSM > 63) ? 7
@@ -171,7 +180,7 @@ module wbhyperram(i_clk, i_reset,
 
 	/////////////////////////////////////////////////////////////
 	//
-	// Handle reset
+	// Handle device reset
 	//
 	//
 	reg	[RP_BITS-1:0]	reset_low_counter;
@@ -248,6 +257,7 @@ module wbhyperram(i_clk, i_reset,
 				&&(pre_ack)
 				&&((cti_write)||(i_hram_rwds[1]))
 				&&(i_wb_addr[AW-1:0] == next_addr);
+
 	end else begin : NO_PIPE
 
 		always @(*)
@@ -261,12 +271,15 @@ module wbhyperram(i_clk, i_reset,
 		wire	[CSM_BITS-1:0]	unused_pipe;
 		assign	unused_pipe = chip_select_count;
 		// Verilator lint_on UNUSED
-		
+
 	end endgenerate
 
+	initial { cti_dev, cti_write } <= 2'b01;
 	always @(posedge i_clk)
 	if (start_stb)
 		{ cti_dev, cti_write } <= { dev_addr, i_wb_we };
+	else if ((!o_hram_cke)||(last_cke))
+		{ cti_dev, cti_write } <= 2'b01;
 
 	initial	o_hram_csn = 1'b1;
 	always @(posedge i_clk)
@@ -284,13 +297,9 @@ module wbhyperram(i_clk, i_reset,
 	else if ((bus_stb)||(cmd_output))
 		o_hram_cke <= 1'b1;
 	else if ((state_ctr == 1)
-			&&((cti_write)||(i_hram_rwds == 2'b10))
+			&&((cti_write)||(i_hram_rwds[1]))
 			&&((!OPT_PIPE)||(!i_wb_stb)||(o_wb_stall)))
 		o_hram_cke <= 1'b0;
-
-always @(*)
-if (state_ctr == 0)
-	assert(!o_hram_cke);
 
 
 	//
@@ -311,8 +320,6 @@ if (state_ctr == 0)
 		r_stall <= 1'b1;
 	else if (bus_stb)
 		r_stall <= 1'b1;
-	else if ((pipe_req)&&(state_ctr == 2))
-		r_stall <= 1'b0;
 	else if ((cmd_ctr>0)||(state_ctr > 1))
 		r_stall <= 1'b1;
 	else if (last_cke)
@@ -369,10 +376,10 @@ if (state_ctr == 0)
 	else if (cmd_output)
 	begin
 		casez({(i_hram_rwds[0]||fixed_latency), cti_dev, cti_write})
-		3'b0?0: state_ctr <= 2 + { 1'b0, latency };
+		3'b0?0: state_ctr <= 1 + { 1'b0, latency };
 		3'b001: state_ctr <= 1 + { 1'b0, latency };
 		3'b?11: state_ctr <= 1;
-		3'b1?0: state_ctr <= 2 + { latency, 1'b0 };
+		3'b1?0: state_ctr <= 1 + { latency, 1'b0 };
 		3'b101: state_ctr <= 1 + { latency, 1'b0 };
 		default: state_ctr <= 1;
 		endcase
@@ -385,7 +392,7 @@ if (state_ctr == 0)
 
 	reg	write_data_shift;
 	always @(posedge i_clk)
-		write_data_shift <= (!o_hram_csn)&&(state_ctr < 4)
+		write_data_shift <= (!o_hram_csn)&&(state_ctr <= 3)
 			&&(!cmd_output)&&(cti_write);
 
 	always @(posedge i_clk)
@@ -407,7 +414,7 @@ if (state_ctr == 0)
 		cfg_write <= 1'b1;
 	else if (bus_stb)
 		cfg_write <= 1'b0;
-	else if (o_hram_csn)
+	else if (!o_hram_cke)
 		cfg_write <= 1'b0;
 
 	initial latency = DEFAULT_LATENCY_COUNT;
@@ -440,9 +447,9 @@ if (state_ctr == 0)
 		o_hram_drive_data <= 1'b1;
 	else if ((start_stb)||(cmd_output))
 		o_hram_drive_data <= 1'b1;
-	else if ((cti_write)&&((bus_stb)||(state_ctr>1)))
+	else if (cti_write) // Any write operation
 		o_hram_drive_data <= 1'b1;
-	else if ((bus_stb)||(state_ctr>1))
+	else if (state_ctr>1) //  Pipelined read operation
 		o_hram_drive_data <= 1'b0;
 	else
 		// Bus cycle is over
@@ -463,7 +470,7 @@ if (state_ctr == 0)
 	else if (cti_write)
 		o_wb_ack <= (pre_ack) &&(!cmd_output)&&(state_ctr == 1);
 	else
-		o_wb_ack <= (pre_ack) &&(i_hram_rwds==2'b10)&&(state_ctr == 1);
+		o_wb_ack <= (pre_ack)&&(i_hram_rwds==2'b10)&&(state_ctr == 1);
 
 	always @(*)
 	if (cmd_output)
@@ -476,13 +483,18 @@ if (state_ctr == 0)
 	//
 	initial	o_hram_rwctrl = RWDS_OUT;
 	always @(posedge i_clk)
-	if (i_reset)
+	if ((i_reset)||(!o_hram_reset_n))
 		o_hram_rwctrl <= RWDS_OUT;
-	else if ((start_stb)||(cmd_output)
-			||((!o_hram_csn)&&(!cti_write)||(cti_dev)))
+	else if ((start_stb)||(cmd_output))
 		o_hram_rwctrl <= RWDS_IN;
-	else if ((cti_write)||(last_cke))
+	else if (last_cke)
 		o_hram_rwctrl <= RWDS_OUT;
+	else if (cti_dev)
+		o_hram_rwctrl <= RWDS_IN;
+	else if ((cti_write)||(o_hram_csn))
+		o_hram_rwctrl <= RWDS_OUT;
+	else
+		o_hram_rwctrl <= RWDS_IN;
 
 	always @(*)
 		o_hram_rwds = (write_data_shift) ? (~data_mask[3:2]) : (2'b00);
@@ -494,9 +506,10 @@ if (state_ctr == 0)
 			actual_cke = o_hram_cke;
 
 		always @(*)
-			last_cke = (state_ctr == 1)&&(!pipe_req)
-				&&((cti_write)||(i_hram_rwds == 2'b10))
-				&&((!OPT_PIPE)||(o_wb_stall));
+			last_cke = (actual_cke)&&(!cmd_output)
+					&&(state_ctr == 1)
+					&&((cti_write)||(i_hram_rwds[1]))
+					&&((o_wb_stall)||(!i_wb_stb));
 
 	end else if (IODELAY == 1)
 	begin
@@ -529,7 +542,7 @@ if (state_ctr == 0)
 	end endgenerate
 
 	always @(posedge i_clk)
-	if (i_hram_rwds == 2'b10)
+	if ((o_hram_cke)&&(i_hram_rwds == 2'b10))
 		o_wb_data <= { o_wb_data[15:0], i_hram_data };
 
 	always @(posedge i_clk)
@@ -557,14 +570,27 @@ if (state_ctr == 0)
 	// Verilator lint_on  UNUSED
 
 ////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////
+//
+//
+//	Formal property section
+//
+//	Does not contain synthesizable code
+//
+//////////////	state_ctr
+//
 ////////////////////////////////////////////////////////////////////////////////
 `ifdef	FORMAL
+	localparam	F_LGDEPTH = 4;
+
+	reg	f_past_valid;
+	reg	[47:0]	lcl_fv_cmd;
+	wire	[(F_LGDEPTH-1):0]	f_nreqs, f_nacks, f_outstanding;
+
+	wire	[31:0]		fvh_vcs_count, fvh_rp_count, fvh_csm_count;
+	wire	[15:0]		fv_cfgword, fv_data;
+	wire	[AW:0]		fv_addr, fv_current_addr;
+	wire	[47:0]		fv_cmd;
+
 
 	always @(*)
 	begin
@@ -572,7 +598,6 @@ if (state_ctr == 0)
 		assert(latency <= DEFAULT_LATENCY_COUNT);
 	end
 
-	reg	f_past_valid;
 	initial	f_past_valid = 1'b0;
 	always @(posedge i_clk)
 		f_past_valid <= 1'b1;
@@ -584,10 +609,10 @@ if (state_ctr == 0)
 			&&(!$past(cmd_output))&&($past(state_ctr)==1))
 		assert(o_wb_ack);
 
-	localparam	F_LGDEPTH = 4;
-
-	wire	[(F_LGDEPTH-1):0]	f_nreqs, f_nacks, f_outstanding;
-
+	//
+	// Interface verification
+	//
+	// Wishbone
 	fwb_slave #(.AW(AW+1), .DW(DW), .F_MAX_STALL(31), .F_MAX_ACK_DELAY(25),
 			.F_LGDEPTH(F_LGDEPTH), .F_MAX_REQUESTS(0))
 		busproperties(i_clk, i_reset,
@@ -596,32 +621,40 @@ if (state_ctr == 0)
 			o_wb_ack, o_wb_stall, o_wb_data, 1'b0,
 			f_nreqs, f_nacks, f_outstanding);
 
-	wire	[31:0]		fvh_vcs_count, fvh_rp_count, fvh_csm_count;
-	wire	[15:0]		fv_cfgword, fv_data;
-	wire	[AW:0]		fv_addr;
-	wire	[47:0]		fv_cmd;
-
+	//
+	// Interface verification
+	//
+	// HyperRAM
 	f_hyperram #(.AW(AW+1), .CLOCK_SPEED_HZ(CLOCK_RATE_HZ),
-			.IODELAY(0))
+			.IODELAY(IODELAY))
 		hyperramp(i_clk,
 			o_hram_reset_n, o_hram_cke, o_hram_csn,
 			o_hram_rwctrl, o_hram_rwds, i_hram_rwds,
 			o_hram_drive_data,
 				o_hram_data, i_hram_data,
-			fv_cmd, fv_addr, fv_data,
+			fv_cmd, fv_addr, fv_data, fv_current_addr,
 			fvh_vcs_count, fvh_rp_count, fvh_csm_count,
 			fv_cfgword);
 
-	always @(*)
-	if (state_ctr > 2)
-		assert(fvh_csm_count < 16);
-	always @(*)
-	if (cmd_ctr == 2'b01)
-		assert(fvh_csm_count == 2);
+	//
+	//
+	// CSM Counter
+	//
+	//
 	always @(*)
 	if (!OPT_PIPE)
 		assert(fvh_csm_count < 64);
+	else if ((OPT_PIPE)&&(!o_hram_csn))
+		assert((chip_select_count == fvh_csm_count[CSM_BITS-1:0])
+			&&(fvh_csm_count[31:CSM_BITS]==0));
 
+	//
+	// Read stalls
+	//
+	// While the number of read stalls is probably not constrained like
+	// this at all, and more likely read stalls are few and far between
+	// (i.e., when the row address changes), this will generalize the
+	// concept, while still allowing us to prove our logic.
 	reg	[4:0]	f_read_stalls;
 	initial	f_read_stalls = 0;
 	always @(posedge i_clk)
@@ -635,14 +668,25 @@ if (state_ctr == 0)
 	if (!OPT_PIPE)
 		assert(f_read_stalls < 16);
 
+	//
+	// Clock Enable
+	//
+	// This is a confusing piece of logic, primarily because the DDR
+	// primitives will create an outgoing clock from this clock enable,
+	// but the enable will get delayed by IODELAY counts
 	always @(*)
 	if ((!o_hram_cke)&&(!actual_cke))
 		assert(o_hram_csn);
 
 	always @(*)
+	if (state_ctr == 0)
+		assert(!o_hram_cke);
+
+	always @(*)
 	if (last_cke)
 		assert(actual_cke);
 
+	// actual_cke should go low following any last_cke
 	always @(posedge i_clk)
 	if ((f_past_valid)&&($past(last_cke)))
 		assert(!actual_cke);
@@ -651,16 +695,9 @@ if (state_ctr == 0)
 	if ((f_past_valid)&&(!$past(i_reset))&&(o_hram_csn))
 		assert(!actual_cke);
 
-//	always @(posedge i_clk)
-//	if ((f_past_valid)&&(o_hram_csn)&&(o_hram_reset_n)&&(!maintenance_stall)
-//		&&(!$past(maintenance_stall))&&($past(o_hram_reset_n)))
-//		assert(!o_wb_stall);
-
-	always @(*)
-	if ((OPT_PIPE)&&(!o_hram_csn))
-		assert((chip_select_count == fvh_csm_count[CSM_BITS-1:0])
-			&&(fvh_csm_count[31:CSM_BITS]==0));
-
+	//
+	// VCS counter
+	//
 	always @(posedge i_clk)
 	if ((!f_past_valid)||($past(!o_hram_reset_n)))
 	begin
@@ -673,17 +710,26 @@ if (state_ctr == 0)
 			assert(reset_recovery == (CK_VCS-fvh_vcs_count));
 	end
 
-	always @(*)
-	case(fv_cfgword[7:4])
-	4'h0: assert(latency == 3'h5);
-	4'h1: assert(latency == 3'h6);
-	4'he: assert(latency == 3'h3);
-	4'hf: assert(latency == 3'h4);
-	endcase
+	//
+	// Latency and fixed latency checks
+	//
+	always @(posedge i_clk)
+	if (((!f_past_valid)||(!$past(i_reset)))
+		&&((o_hram_csn)||(!cti_dev)||(!cti_write)))
+	begin
+		case(fv_cfgword[7:4])
+		4'h0: assert(latency == 3'h5);
+		4'h1: assert(latency == 3'h6);
+		4'he: assert(latency == 3'h3);
+		4'hf: assert(latency == 3'h4);
+		endcase
 
-	always @(*)
-	assert(fixed_latency == fv_cfgword[3]);
+		assert(fixed_latency == fv_cfgword[3]);
+	end
 
+	//
+	//
+	//
 	always @(*)
 	if ((!o_hram_csn)&&(cmd_output))
 	begin
@@ -711,9 +757,6 @@ if (state_ctr == 0)
 
 	always @(*)
 		assert(cmd_output == (cmd_ctr != 0));
-	always @(*)
-	if ((state_ctr == 0)&&(!actual_cke))
-		assert(o_hram_csn);
 
 	always @(*)
 	if (pipe_stb)
@@ -751,6 +794,118 @@ if (state_ctr == 0)
 			assert((!pre_ack)||(f_outstanding == 1));
 	end
 
+	//
+	//
+	// Address matching
+	//
+	reg	[DW-1:0]	f_wb_data_copy;
+	reg	[DW/8-1:0]	f_wb_sel_copy;
+	reg	[AW-1:0]	f_wb_addr_copy;
+	always @(posedge i_clk)
+	begin
+		if ((i_wb_stb)&&(!o_wb_stall))
+			f_wb_addr_copy <= i_wb_addr;
+
+		if ((i_wb_stb)&&(!o_wb_stall)&&(i_wb_we))
+		begin
+			f_wb_data_copy <= i_wb_data;
+			f_wb_sel_copy <= i_wb_sel;
+		end
+
+		if ((!cmd_output)&&(!cti_write)&&(!cti_dev)&&(i_hram_rwds[1]))
+		begin
+			if (state_ctr == 2)
+				assert({f_wb_addr_copy, 1'b0} == fv_current_addr);
+			if (state_ctr == 1)
+				assert({f_wb_addr_copy, 1'b1} == fv_current_addr);
+		end
+	end
+
+	// Incoming data matching
+	always @(posedge i_clk)
+	if ((o_wb_ack)&&(!cti_write)&&(!cti_dev)
+		&&($past(f_wb_addr_copy) == fv_addr[AW:1]))
+	begin
+		if (!$past(fv_addr[0]))
+			assert(o_wb_data[31:16] == fv_data);
+		else
+			assert(o_wb_data[15:0] == fv_data);
+	end
+
+	// Outoing data write verification
+	always @(posedge i_clk)
+	if ((o_wb_ack)&&($past((cti_write)&&(!cti_dev))))
+	begin
+		assert((state_ctr == 2)||(state_ctr == 0));
+		assert($past(o_hram_drive_data));
+		assert($past(o_hram_rwctrl));
+		assert($past(f_wb_data_copy[15:0])==$past(o_hram_data));
+		assert($past(f_wb_sel_copy[1:0])== ~$past(o_hram_rwds[1:0]));
+		//
+		assert($past(o_hram_drive_data,2));
+		assert($past(o_hram_rwctrl,2));
+		assert($past(f_wb_data_copy[31:16])==$past(o_hram_data,2));
+		assert($past(f_wb_sel_copy[3:2])== ~$past(o_hram_rwds[1:0],2));
+	end
+	generate if (IODELAY == 0)
+	begin
+		always @(posedge i_clk)
+		if ((!o_hram_csn)&&(!cmd_output)&&(cti_write)&&(!cti_dev))
+		begin
+			if (state_ctr == 2)
+				assert({ f_wb_addr_copy, 1'b0 } == fv_current_addr);
+			if (state_ctr == 1)
+				assert({ f_wb_addr_copy, 1'b1 } == fv_current_addr);
+		end
+
+		always @(posedge i_clk)
+		if ((f_past_valid)&&($past((o_wb_ack)&&(cti_write)&&(!cti_dev)))
+			&&($past(f_wb_addr_copy,IODELAY+1)==fv_addr[AW:1]))
+			// &&($past(state_ctr,8)==3) // This passes
+		begin
+			if ((!fv_addr[0])&&($past(f_wb_sel_copy[3],IODELAY+2)))
+				assert(fv_data[15:8] == $past(f_wb_data_copy[31:24],IODELAY+2));
+			if ((!fv_addr[0])&&($past(f_wb_sel_copy[2],IODELAY+2)))
+				assert(fv_data[7:0] == $past(f_wb_data_copy[23:16],IODELAY+2));
+
+			if ((fv_addr[0])&&($past(f_wb_sel_copy[3],IODELAY+2)))
+				assert(fv_data[15:8] == $past(f_wb_data_copy[15:8],IODELAY+2));
+			if ((fv_addr[0])&&($past(f_wb_sel_copy[2],IODELAY+2)))
+				assert(fv_data[7:0] == $past(f_wb_data_copy[7:0],IODELAY+2));
+		end
+
+	end else begin
+
+		always @(posedge i_clk)
+		if ((!o_hram_csn)&&(!cmd_output)
+			&&($past((cti_write)&&(!cti_dev),IODELAY)))
+		begin
+			if ($past((state_ctr == 2), IODELAY))
+			assert({$past(f_wb_addr_copy,IODELAY), 1'b0}
+						== fv_current_addr);
+			if ($past((state_ctr == 1), IODELAY))
+			assert({$past(f_wb_addr_copy,IODELAY), 1'b1}
+						== fv_current_addr);
+		end
+
+		always @(posedge i_clk)
+		if ((f_past_valid)&&($past((o_wb_ack)&&(cti_write)&&(!cti_dev)))
+			&&($past(f_wb_addr_copy,IODELAY+1)==fv_addr[AW:1]))
+			// &&($past(state_ctr,8)==3) // This passes
+		begin
+			if ((!fv_addr[0])&&($past(f_wb_sel_copy[3],IODELAY+2)))
+				assert(fv_data[15:8] == $past(f_wb_data_copy[31:24],IODELAY+2));
+			if ((!fv_addr[0])&&($past(f_wb_sel_copy[2],IODELAY+2)))
+				assert(fv_data[7:0] == $past(f_wb_data_copy[23:16],IODELAY+2));
+
+			if ((fv_addr[0])&&($past(f_wb_sel_copy[3],IODELAY+2)))
+				assert(fv_data[15:8] == $past(f_wb_data_copy[15:8],IODELAY+2));
+			if ((fv_addr[0])&&($past(f_wb_sel_copy[2],IODELAY+2)))
+				assert(fv_data[7:0] == $past(f_wb_data_copy[7:0],IODELAY+2));
+		end
+
+	end endgenerate
+
 	generate if (F_OPT_COVER)
 	begin : GEN_COVER
 
@@ -780,7 +935,6 @@ if (state_ctr == 0)
 	if ((f_past_valid)&&($past(i_reset)))
 		assert(o_hram_csn);
 
-	reg	[47:0]	lcl_fv_cmd;
 	always @(posedge i_clk)
 	if (start_stb)
 		lcl_fv_cmd <= { (!i_wb_we), dev_addr, 1'b1,
@@ -866,7 +1020,7 @@ if (state_ctr == 0)
 		##1 (o_hram_data == fv_cmd[31:16])&&(cmd_ctr == 2)
 		##1 (o_hram_data == fv_cmd[15: 0])&&(cmd_ctr == 1));
 	endsequence
-		
+
 	sequence	DEV_WRITE_SEQ;
 		((!o_hram_csn)&&(cti_write)&&(cti_dev)&&(!cmd_output)
 			&&(o_hram_drive_data)&&(o_hram_cke)
@@ -959,7 +1113,7 @@ if (state_ctr == 0)
 		disable iff ((i_reset)||(!i_wb_cyc))
 		((start_stb)&&(read_stb)) |=> COMMAND_SEQ);
 
-	// 
+	//
 	// Memory read, single latency
 	assert property (@(posedge i_clk)
 		disable iff ((i_reset)||(!i_wb_cyc))
@@ -978,7 +1132,7 @@ if (state_ctr == 0)
 			&&(o_wb_data[15:0] == $past(i_hram_data))
 			&&((o_hram_csn)||((OPT_PIPE)&&($past(read_stb)))));
 
-	// 
+	//
 	// Memory read, double latency
 	assert property (@(posedge i_clk)
 		disable iff ((i_reset)||(!i_wb_cyc))
@@ -991,7 +1145,7 @@ if (state_ctr == 0)
 			&&(o_hram_rwctrl == RWDS_IN) [*(2*LATENCY_COUNT-3+1)]
 		##1 (!o_hram_csn)&&(o_hram_cke)&&(!o_hram_drive_data)
 			&&(state_ctr == 3)
-			&&(o_hram_rwctrl == RWDS_IN) 
+			&&(o_hram_rwctrl == RWDS_IN)
 		##1 ((!o_wb_ack) throughout READ_WORD_SEQ)
 		##1 (o_wb_ack)&&(o_wb_data[31:16] == $past(i_hram_data,2))
 			&&(o_wb_data[15:0] == $past(i_hram_data))
@@ -1015,7 +1169,7 @@ if (state_ctr == 0)
 		##1 (READ_WORD_SEQ)
 		##1 (o_wb_ack)&&(o_wb_addr[15:0] == fv_data));
 
-	// 
+	//
 	// Memory read, pipelined
 	assert	property (@(posedge i_clk)
 		disable iff ((i_reset)||(!i_wb_cyc))

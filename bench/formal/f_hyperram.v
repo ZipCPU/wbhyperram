@@ -5,7 +5,10 @@
 // Project:	WB-HyperRAM, a wishbone controller for a hyperRAM interface
 //
 // Purpose:	Provides a set of formal properties for testing a HyperRAM
-//		module against.
+//		module against.  As with the module in this repository, the
+//	I/O's are intended to be used in an environment with DDR I/O's.
+//	The 90-degree offset clock is also required to be externally provided
+//	and verified.
 //
 // Creator:	Dan Gisselquist, Ph.D.
 //		Gisselquist Technology, LLC
@@ -47,7 +50,7 @@ module f_hyperram(i_clk,
 		i_reset_n, i_cke,    i_csn,
 		i_rwctrl,  i_rw_out, i_rw_in,
 		i_dq_we,   i_dq_out, i_dq_in,
-		o_fv_cmd, o_fv_addr,  o_fv_data,
+		o_fv_cmd, o_fv_addr,  o_fv_data, o_fv_current_addr,
 		o_vcs_count, o_rp_count, o_csm_count,
 		o_cfgword);
 	parameter	CLOCK_SPEED_HZ =   100_000_000;
@@ -59,9 +62,10 @@ module f_hyperram(i_clk,
 	input	wire	[1:0]	i_rw_out, i_rw_in;
 	input	wire		i_dq_we;
 	input	wire	[15:0]	i_dq_out, i_dq_in;
-	output	reg	[47:0]	o_fv_cmd;
+	output	wire	[47:0]	o_fv_cmd;
 	output	reg	[AW-1:0] o_fv_addr;
 	output	reg	[15:0]	o_fv_data;
+	output	reg	[AW-1:0] o_fv_current_addr;
 	output	reg	[31:0]	o_vcs_count, o_rp_count, o_csm_count;
 	output	reg	[15:0]	o_cfgword;
 
@@ -76,6 +80,9 @@ module f_hyperram(i_clk,
 	localparam	CK_RP  = (200 + (CLOCK_SPEED_NS-1)) / CLOCK_SPEED_NS,
 			CK_VCS = (150_000 / CLOCK_SPEED_NS),
 			CK_CSM = (4_000_000 / CLOCK_SPEED_NS);
+	localparam [1:0]	READ_MEM  = 2'b10,
+				WRITE_MEM = 2'b00,
+				WRITE_DEV = 2'b01;
 
 	initial assert(CLOCK_SPEED_HZ < 166_000_000);
 
@@ -255,7 +262,8 @@ module f_hyperram(i_clk,
 		// else if ((start_count == 3)&&(!i_rwctrl))
 		//	assume(($stable(i_rw_in))&&(i_rw_in[0] == i_rw_in[1]));
 
-		double_latency <= (fixed_latency)||(i_rw_in);
+		if (start_count == 0)
+			double_latency <= (fixed_latency)||(i_rw_in);
 	end
 
 	always @(*)
@@ -275,7 +283,7 @@ module f_hyperram(i_clk,
 		o_cfgword <= 16'b1000_1111_0001_1111;
 	else if ((dly_cke)&&(!i_csn)&&(start_count == 3))
 	begin
-		devwrite = (fv_cmd[47:46] == 2'b01);
+		devwrite = (fv_cmd[47:46] == WRITE_DEV);
 		devwrite = (devwrite) && (fv_cmd[44:0] == 0);
 
 		if (devwrite)
@@ -322,12 +330,15 @@ module f_hyperram(i_clk,
 	assign	cmd_addr = { fv_cmd[44:16], fv_cmd[2:0] };
 	assign	cmd_read =   fv_cmd[47];
 	assign	cmd_write = !cmd_read;
-	assign	cmd_dev = !cmd_read;
+	assign	cmd_dev = { fv_cmd[47:46] == WRITE_DEV };
 	always @(posedge i_clk)
 	if (start_count == 3)
 		mem_addr <= cmd_addr[AW-1:0];
 	else if (active)
 		mem_addr <= mem_addr + 1;
+
+	always @(*)
+		o_fv_current_addr = mem_addr;
 
 	always @(posedge i_clk)
 	if (start_count > 2)
@@ -349,17 +360,30 @@ module f_hyperram(i_clk,
 		counts_till_active = 2*latency;
 	else if (start_count == 1)
 	begin
-		if (fv_cmd[47:46]==2'b00)
+		if (fv_cmd[47:46] == WRITE_DEV)
 			counts_till_active <= 3;
 		else if (double_latency)
-			counts_till_active <= latency * 2;
+			counts_till_active <= latency * 2-1;
 		else
-			counts_till_active <= latency;
-	end else if (counts_till_active > 0)
+			counts_till_active <= latency-1;
+	end else if ((start_count > 2)&&(counts_till_active > 0))
 		counts_till_active <= counts_till_active - 1;
 
+	always @(*)
+	if (!i_rwctrl)
+	begin
+		assert(!i_csn);
+
+		if (start_count < 3)
+			assume(i_rw_in[0] == i_rw_in[1]);
+		else if ((counts_till_active > 0)
+				&&(counts_till_active < 2))
+			assume(i_rw_in == 2'b00);
+	end
+
+
 	always @(posedge i_clk)
-	if ((!i_csn)&&(counts_till_active == 1)&&(cmd_write))
+	if ((!i_csn)&&(counts_till_active == 1)&&(cmd_write)&&(!cmd_dev))
 		assert((i_rwctrl)&&(dly_rw_out == 2'b00));
 
 	always @(*)
@@ -401,9 +425,9 @@ module f_hyperram(i_clk,
 	always @(posedge i_clk)
 	if ((active)&&(cmd_write)&&(!cmd_dev)&&(mem_addr == o_fv_addr))
 	begin
-		if (!dly_rw_out[0])
-			o_fv_data[15: 8] <= dly_dq_out[15:8];
 		if (!dly_rw_out[1])
+			o_fv_data[15: 8] <= dly_dq_out[15:8];
+		if (!dly_rw_out[0])
 			o_fv_data[ 7: 0] <= dly_dq_out[ 7:0];
 	end
 
