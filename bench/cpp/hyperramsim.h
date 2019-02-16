@@ -69,11 +69,16 @@ public:
 		return m_mem[addr & m_mask];
 	}
 
-	unsigned operator()(int reset_n, int cke, int csn, int rwctrl, int rwds,
+	unsigned apply(int reset_n, int cke, int csn, int rwctrl, int rwds,
 			int drive_data, int data);
 
-	inline unsigned DAT(unsigned vl) const { return (vl&0x0ffff); }
-	inline unsigned RWS(unsigned vl) const { return (vl >> 16)&3; }
+	unsigned operator()(int reset_n, int cke, int csn, int rwctrl, int rwds,
+			int drive_data, int data) {
+		return apply(reset_n, cke, csn, rwctrl, rwds, drive_data, data);
+	}
+
+	static inline unsigned DAT(unsigned vl) { return (vl&0x0ffff); }
+	static inline unsigned RWS(unsigned vl) { return (vl >> 16)&3; }
 };
 
 #endif

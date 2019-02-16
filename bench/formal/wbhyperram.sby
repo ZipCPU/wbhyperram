@@ -1,12 +1,14 @@
 [tasks]
-prf
-cvr
+pipe_prf  prf pipe
+pipe_cvr  cvr pipe
+plain_prf prf
+plain_cvr cvr
 
 [options]
 prf: mode	prove
 cvr: mode	cover
 
-prf: depth 40
+prf: depth  40
 cvr: depth 180
 
 [engines]
@@ -16,6 +18,9 @@ smtbmc
 read -formal f_hyperram.v
 read -formal fwb_slave.v
 read -formal wbhyperram.v
+pipe:  chparam -set OPT_PIPE 1    wbhyperram
+~pipe: chparam -set OPT_PIPE 0    wbhyperram
+cvr:   chparam -set F_OPT_COVER 1 wbhyperram
 prep -top wbhyperram
 
 [files]

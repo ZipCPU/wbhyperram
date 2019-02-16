@@ -56,10 +56,20 @@ void	HYPERRAMSIM::load(const unsigned int addr,
 	zero();
 }
 
+bool active = false;
 
-unsigned HYPERRAMSIM::operator()(int reset_n,
+unsigned HYPERRAMSIM::apply(int reset_n,
 	int cke, int csn, int rwctrl, int rwds, int drive_data, int data) {
 	unsigned	result;
+
+	/*
+	printf("HYPERRAM: %s%s%s %s%d %s%04x\n",
+		(reset_n == 0) ? "RESET":"",
+		( cke)?"CK":"  ",	
+		(!csn)?"CS":"  ",	
+		(rwctrl)?"RW":"  ", rwds,
+		(drive_data)?"DR":"  ",	data & 0x0ffff);
+		*/
 
 	rwds &= 3;
 	data &= 0x0ffff;
@@ -75,12 +85,12 @@ unsigned HYPERRAMSIM::operator()(int reset_n,
 		m_countdown= 12;
 
 		m_dly_cke    =  cke;
-		m_dly_rwctrl = !rwctrl;
+		m_dly_rwctrl =  rwctrl;
 		m_dly_data   =  data;
 		m_dly_rwds   =  rwds;
 		m_dly_drive  =  drive_data;
 
-		assert(rwctrl);
+		// assert(rwctrl);
 		assert(drive_data);
 
 		if (!reset_n) {
@@ -90,12 +100,19 @@ unsigned HYPERRAMSIM::operator()(int reset_n,
 
 		if (m_dly_drive)
 			m_dly_result = (m_dly_result & ~0x0ffff) | (m_dly_data & 0x0ffff);
-		if (m_dly_rwctrl)
+		if (!m_dly_rwctrl)
 			m_dly_result = (m_dly_result & ~0x30000) | (m_dly_rwds << 16);
 
+		if (active)
+			printf("Was active\n");
+		active = false;
 		return m_dly_result;
 	}
 
+	printf("HRAM ACTIVE, STRT = %2d, CNT=%2d, CKE = %d->%d, DATA=%04x, %04x\n", m_startctr,
+			m_countdown, cke, m_dly_cke, data & 0x0ffff, m_dly_data & 0x0ffff);
+	assert(m_startctr < 40);
+	active = true;
 	if (m_dly_cke)
 		m_startctr++;
 	if (m_startctr == 1) {
@@ -111,11 +128,16 @@ unsigned HYPERRAMSIM::operator()(int reset_n,
 
 		m_cmd[0] = m_dly_data;
 
-		assert((m_cmd[0]&0x2000)==0);
-	} else if (m_startctr == 2)
+		// Support linear mode only
+		assert((m_cmd[0]&0x2000)!=0);
+		printf("CMD[0] = %04x\n", m_cmd[0]);
+	} else if (m_startctr == 2) {
 		m_cmd[1] = m_dly_data;
-	else if (m_startctr == 3) {
-		m_cmd[2] == m_dly_data;
+		printf("CMD[1] = %04x\n", m_cmd[1]);
+	} else if (m_startctr == 3) {
+		m_cmd[2] = m_dly_data;
+		printf("CMD[2] = %04x", m_cmd[2]);
+		// Insist that the reserved bits be zero
 		assert((m_cmd[2]&0xfff8)==0);
 
 		m_addr  = (m_cmd[0]&0x01fff) << (16+3);
@@ -123,20 +145,23 @@ unsigned HYPERRAMSIM::operator()(int reset_n,
 		m_addr |=  m_cmd[2] &7;
 
 		assert((m_addr & ~m_mask)==0);
+		printf(", CMD = %04x:%04x:%04x", m_cmd[0]&0x0ffff,
+					m_cmd[1]&0x0fffff, m_cmd[2]&0x0ffff);
+		printf(", maddr = %08x\n", m_addr);
 	} else if (m_startctr == 4) {
-		// Check for a data write
+		// Check for a data register write
 		if (((m_cmd[0] & 0xc000) == 0x4000)
 			&&(m_cmd[1] == 0)
 			&&(m_cmd[2] == 0)) {
 			m_cfgword = m_dly_data & 0x0ffff;
 
-			if (m_cfgword&0x0f0 == 0x010)
+			if ((m_cfgword&0x0f0) == 0x010)
 				m_latency = 5;
-			else if (m_cfgword&0x0f0 == 0x020)
+			else if ((m_cfgword&0x0f0) == 0x020)
 				m_latency = 6;
-			else if (m_cfgword&0x0f0 == 0x0e0)
+			else if ((m_cfgword&0x0f0) == 0x0e0)
 				m_latency = 3;
-			else if (m_cfgword&0x0f0 == 0x0f0)
+			else if ((m_cfgword&0x0f0) == 0x0f0)
 				m_latency = 4;
 			else
 				assert((0)&&("Invalid latency"));
@@ -151,14 +176,16 @@ unsigned HYPERRAMSIM::operator()(int reset_n,
 		m_countdown--;
 
 	if ((m_countdown == 0)&&(m_dly_cke)) {
+		printf("Countdown = 0, address = %08x\n", m_addr);
 		bool read = (m_cmd[0]&0x8000);
-		bool dev  = (m_cmd[0]&0x4000);
 
 		m_dly_result = (m_dly_result & 0x30000) | (m_mem[m_addr] & 0x0ffff);
 		if (!read) {
+			// We are writing
 			assert(m_dly_rwctrl);
 			if (m_dly_rwds == 0)
 				m_mem[m_addr] = m_dly_data;
+
 			else {
 				if ((m_dly_rwds&2)==0)
 					m_mem[m_addr] = (m_mem[m_addr]&0x0ff)
@@ -167,23 +194,34 @@ unsigned HYPERRAMSIM::operator()(int reset_n,
 					m_mem[m_addr] = (m_mem[m_addr]&0x0ff00)
 							|(m_dly_data&0x0ff);
 			}
+
+			if (m_dly_rwds != 3)
+				printf("HYPERRAM[%06x] = %04x\n", m_addr, m_mem[m_addr]);
 			if (m_dly_rwds != 3)
 				m_zero = false;
 		} else {
 			assert(!m_dly_rwctrl);
-			m_dly_result = (m_dly_result & 0x0ffff) | (2 << 16);
+			m_dly_result = (m_mem[m_addr] & 0x0ffff) | (2 << 16);
+			printf("HYPERRAM[%06x] > %04x (READ)\n", m_addr, m_mem[m_addr]);
 		}
 		m_addr++;
 	}
 
 	//
 	//
-	if (!m_dly_rwctrl)
+	if (m_dly_rwctrl)
 		m_dly_result = (m_dly_result & 0x0ffff)
 				|| (m_dly_rwds << 16);
 	if (m_dly_drive)
 		m_dly_result = (m_dly_result & 0x30000)
 				|| (m_dly_data & 0x0ffff);
 
+	m_dly_cke    =  cke;
+	m_dly_rwctrl =  rwctrl;
+	m_dly_data   =  data;
+	m_dly_rwds   =  rwds;
+	m_dly_drive  =  drive_data;
+
+	printf("RESULT=%05x, DLY-RESULT=%05x\n", result, m_dly_result);
 	return result;
 }

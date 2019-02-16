@@ -55,7 +55,8 @@ module f_hyperram(i_clk,
 		o_cfgword);
 	parameter	CLOCK_SPEED_HZ =   100_000_000;
 	parameter	AW = 22;
-	parameter	IODELAY = 22;
+	parameter	RDDELAY = 3;
+	parameter [0:0]	F_OPT_COVER = 1'b0;
 	//
 	input	wire	i_clk;
 	input	wire	i_reset_n, i_cke, i_csn, i_rwctrl;
@@ -108,45 +109,40 @@ module f_hyperram(i_clk,
 
 	/////////////////////////////////////////////
 	//
-	// Delay the high speed IO lines
+	// Delay the return IO lines
 	//
-	reg		dly_cke;
-	reg	[1:0]	dly_rw_out;
-	reg	[15:0]	dly_dq_out;
-	generate if (IODELAY == 0)
+	(* anyseq *)	reg	[1:0]	dly_rw_in;
+	(* anyseq *)	reg	[15:0]	dly_dq_in;
+
+	generate if (RDDELAY == 0)
 	begin
 
 		always @(*)
 		begin
-			dly_cke     = i_cke;
-			dly_rw_out  = i_rw_out;
-			dly_dq_out  = i_dq_out;
+			assume(i_rw_in == dly_rw_in);
+			assume(i_dq_in == dly_dq_in);
 		end
 
-	end else if (IODELAY == 1)
+	end else // if (RDDELAY == 1)
 	begin
 
+		reg	[ 2*RDDELAY-1:0]	rw_pipe;
+		reg	[16*RDDELAY-1:0]	dq_pipe;
+
 		always @(posedge i_clk)
 		begin
-			dly_cke    <= i_cke;
-			dly_rw_out <= i_rw_out;
-			dly_dq_out <= i_dq_out;
+			rw_pipe <= { rw_pipe[ 2*(RDDELAY-1)-1:0], dly_rw_in };
+			dq_pipe <= { dq_pipe[16*(RDDELAY-1)-1:0], dly_dq_in };
 		end
 
-	end else begin
-
-		reg	[IODELAY-2:0]		pipe_cke;
-		reg	[2*(IODELAY-1):0]	pipe_rw_out;
-		reg	[16*(IODELAY-1):0]	pipe_dq_out;
-
-		always @(posedge i_clk)
+		always @(*)
 		begin
-			{ dly_cke, pipe_cke } <= { pipe_cke, i_cke };
-			{ dly_rw_out, pipe_rw_out} <= { pipe_rw_out, i_rw_out };
-			{ dly_dq_out, pipe_dq_out }<= { pipe_dq_out, i_dq_out };
+			assume(i_rw_in==rw_pipe[ 2*RDDELAY-1 : 2*(RDDELAY-1)]);
+			assume(i_dq_in==dq_pipe[16*RDDELAY-1 :16*(RDDELAY-1)]);
 		end
 
 	end endgenerate
+
 
 	/////////////////////////////////////////////
 	//
@@ -155,33 +151,38 @@ module f_hyperram(i_clk,
 
 	//
 	// Insist on a minimum pulse width
-	initial	o_rp_count = 0;
-	always @(posedge i_clk)
-	if (i_reset_n)
-		o_rp_count <= 0;
-	else if (!(&o_rp_count))
-		o_rp_count <= o_rp_count + 1;
+	generate if (!F_OPT_COVER)
+	begin
 
-	always @(posedge i_clk)
-	if ((f_past_valid)&&($rose(i_reset_n)))
-		assert(o_rp_count >= CK_RP);
+		initial	o_rp_count = 0;
+		always @(posedge i_clk)
+		if (i_reset_n)
+			o_rp_count <= 0;
+		else if (!(&o_rp_count))
+			o_rp_count <= o_rp_count + 1;
 
-	always @(posedge i_clk)
-	if (!i_reset_n)
-		assert(i_csn);
+		always @(posedge i_clk)
+		if ((f_past_valid)&&($rose(i_reset_n)))
+			assert(o_rp_count >= CK_RP);
 
-	//
-	// Insist on known delay from reset rising edge to the first CS#
-	initial	o_vcs_count = 0;
-	always @(posedge i_clk)
-	if (!i_reset_n)
-		o_vcs_count <= 0;
-	else if ((i_reset_n)&&(!(&o_vcs_count)))
-		o_vcs_count <= o_vcs_count + 1'b1;
+		always @(posedge i_clk)
+		if (!i_reset_n)
+			assert(i_csn);
 
-	always @(posedge i_clk)
-	if ((o_vcs_count < CK_VCS)||(!i_reset_n))
-		assert(i_csn);
+		//
+		// Insist on known delay from reset rising
+		// edge to the first CS#
+		initial	o_vcs_count = 0;
+		always @(posedge i_clk)
+		if (!i_reset_n)
+			o_vcs_count <= 0;
+		else if ((i_reset_n)&&(!(&o_vcs_count)))
+			o_vcs_count <= o_vcs_count + 1'b1;
+
+		always @(posedge i_clk)
+		if ((o_vcs_count < CK_VCS)||(!i_reset_n))
+			assert(i_csn);
+	end endgenerate
 
 	/////////////////////////////////////////////
 	//
@@ -224,7 +225,7 @@ module f_hyperram(i_clk,
 	always @(posedge i_clk)
 	if (i_csn)
 		start_count <= 0;
-	else if ((!i_csn)&&(dly_cke)&&(!(&start_count)))
+	else if ((!i_csn)&&(i_cke)&&(!(&start_count)))
 		start_count <= start_count + 1'b1;
 
 	/////////////////////////////////////////////
@@ -235,40 +236,40 @@ module f_hyperram(i_clk,
 	reg		double_latency;
 
 	always @(posedge i_clk)
-	if ((dly_cke)&&(!i_csn))
+	if ((i_cke)&&(!i_csn))
 	begin
 		if (start_count == 0)
 		begin
-			fv_cmd[47:32] <= dly_dq_out;
+			fv_cmd[47:32] <= i_dq_out;
 
 			// While the chip supports wrapped burst mode, this
 			// property set only includes linear burst mode
-			assert(dly_dq_out[13]);
+			assert(i_dq_out[13]);
 		end
 		if (start_count == 1)
-			fv_cmd[31:16] <= dly_dq_out;
+			fv_cmd[31:16] <= i_dq_out;
 		if (start_count == 2)
-			fv_cmd[15: 0] <= dly_dq_out;
+			fv_cmd[15: 0] <= i_dq_out;
 
 		if (start_count < 3)
 			assert((i_dq_we)&&(!i_rwctrl));
 
 		if ((start_count > 0)&&(start_count < 3))
 		begin
-			assume(($stable(i_rw_in))&&(i_rw_in[0] == i_rw_in[1]));
+			assume(($stable(dly_rw_in))&&(dly_rw_in[0] == dly_rw_in[1]));
 			if (fixed_latency)
-				assume(i_rw_in == 2'b11);
+				assume(dly_rw_in == 2'b11);
 		end
 		// else if ((start_count == 3)&&(!i_rwctrl))
-		//	assume(($stable(i_rw_in))&&(i_rw_in[0] == i_rw_in[1]));
+		//	assume(($stable(dly_rw_in))&&(dly_rw_in[0] == dly_rw_in[1]));
 
 		if (start_count == 0)
-			double_latency <= (fixed_latency)||(i_rw_in);
+			double_latency <= (fixed_latency)||(dly_rw_in);
 	end
 
 	always @(*)
 	if (i_rwctrl)
-		assume(i_rw_in == dly_rw_out);
+		assume(dly_rw_in == i_rw_out);
 
 	assign	o_fv_cmd = fv_cmd;
 	/////////////////////////////////////////////
@@ -281,7 +282,7 @@ module f_hyperram(i_clk,
 	always @(posedge i_clk)
 	if (!i_reset_n)
 		o_cfgword <= 16'b1000_1111_0001_1111;
-	else if ((dly_cke)&&(!i_csn)&&(start_count == 3))
+	else if ((i_cke)&&(!i_csn)&&(start_count == 3))
 	begin
 		devwrite = (fv_cmd[47:46] == WRITE_DEV);
 		devwrite = (devwrite) && (fv_cmd[44:0] == 0);
@@ -291,14 +292,14 @@ module f_hyperram(i_clk,
 
 		if (devwrite)
 		begin
-			o_cfgword <= dly_dq_out;
-			assert(dly_dq_out[11:8] == 4'hf);
+			o_cfgword <= i_dq_out;
+			assert(i_dq_out[11:8] == 4'hf);
 		end
 
 		if (AW > 22)
 			o_cfgword[3] <= 1'b1;
 
-		// fixed_latency <= (AW <= 22) ? dly_dq_out[3] : 1'b1;
+		// fixed_latency <= (AW <= 22) ? i_dq_out[3] : 1'b1;
 	end
 
 	always @(*)
@@ -334,7 +335,7 @@ module f_hyperram(i_clk,
 	always @(posedge i_clk)
 	if (start_count == 3)
 		mem_addr <= cmd_addr[AW-1:0];
-	else if (active)
+	else if (active && (dly_rw_in == 2'b10))
 		mem_addr <= mem_addr + 1;
 
 	always @(*)
@@ -374,44 +375,43 @@ module f_hyperram(i_clk,
 	begin
 		assert(!i_csn);
 
-		if (start_count < 3)
-			assume(i_rw_in[0] == i_rw_in[1]);
-		else if ((counts_till_active > 0)
-				&&(counts_till_active < 2))
-			assume(i_rw_in == 2'b00);
+		if ((start_count < 3)||(counts_till_active >= 2))
+			assume(dly_rw_in[0] == dly_rw_in[1]);
+		else if (counts_till_active > 0)
+			assume(dly_rw_in == 2'b00);
 	end
 
 
 	always @(posedge i_clk)
 	if ((!i_csn)&&(counts_till_active == 1)&&(cmd_write)&&(!cmd_dev))
-		assert((i_rwctrl)&&(dly_rw_out == 2'b00));
+		assert((i_rwctrl)&&(i_rw_out == 2'b00));
 
 	always @(*)
 	if ((counts_till_active == 0)&&(!i_csn))
-		assume((i_rwctrl)||(i_rw_in[0] == 0));
+		assume((i_rwctrl)||(dly_rw_in[0] == 0));
 
 
 	always @(*)
-		read_stall = (!i_csn)&&(cmd_read)&&(!i_rwctrl)&&(!i_rw_in[1]);
+		read_stall = (!i_csn)&&(cmd_read)&&(!i_rwctrl)&&(!dly_rw_in[1]);
 
 	always @(posedge i_clk)
 	if ((f_past_valid)&&($past(read_stall))&&(!i_csn))
-		assume(i_rw_in[1]);
+		assume(dly_rw_in[1]);
 
 	always @(*)
 		active = (counts_till_active == 0)
-			&&(!i_csn)&&(!read_stall)&&(dly_cke);
+			&&(!i_csn)&&(!read_stall)&&(i_cke);
 
 	initial	stall_count = 0;
 	always @(posedge i_clk)
 	if ((i_csn)||(cmd_write))
 		stall_count <= 0;
-	else if ((counts_till_active == 0)&&(dly_cke)&&(i_rw_in==2'b00))
+	else if ((counts_till_active == 0)&&(i_cke)&&(dly_rw_in==2'b00))
 		stall_count <= stall_count + 1'b1;
 
 	always @(*)
 	if ((&stall_count)&&(!i_csn)&&(counts_till_active == 0)&&(!cmd_write))
-		assume(i_rw_in == 2'b10);
+		assume(dly_rw_in == 2'b10);
 
 	always @(*)
 	if (active)
@@ -419,16 +419,16 @@ module f_hyperram(i_clk,
 
 	always @(*)
 	if ((active)&&(cmd_read)&&(!cmd_dev)&&(mem_addr == o_fv_addr))
-		assume(i_dq_in == o_fv_data);
+		assume(dly_dq_in == o_fv_data);
 
 	initial	o_fv_data = 0;
 	always @(posedge i_clk)
 	if ((active)&&(cmd_write)&&(!cmd_dev)&&(mem_addr == o_fv_addr))
 	begin
-		if (!dly_rw_out[1])
-			o_fv_data[15: 8] <= dly_dq_out[15:8];
-		if (!dly_rw_out[0])
-			o_fv_data[ 7: 0] <= dly_dq_out[ 7:0];
+		if (!i_rw_out[1])
+			o_fv_data[15: 8] <= i_dq_out[15:8];
+		if (!i_rw_out[0])
+			o_fv_data[ 7: 0] <= i_dq_out[ 7:0];
 	end
 
 endmodule
