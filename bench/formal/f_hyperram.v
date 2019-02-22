@@ -182,6 +182,11 @@ module f_hyperram(i_clk,
 		always @(posedge i_clk)
 		if ((o_vcs_count < CK_VCS)||(!i_reset_n))
 			assert(i_csn);
+	end else begin
+		always @(*)
+			o_rp_count <= CK_RP;
+		always @(*)
+			o_vcs_count <= CK_VCS;
 	end endgenerate
 
 	/////////////////////////////////////////////
@@ -264,7 +269,7 @@ module f_hyperram(i_clk,
 		//	assume(($stable(dly_rw_in))&&(dly_rw_in[0] == dly_rw_in[1]));
 
 		if (start_count == 0)
-			double_latency <= (fixed_latency)||(dly_rw_in);
+			double_latency <= (fixed_latency)||(dly_rw_in[0]);
 	end
 
 	always @(*)
@@ -335,7 +340,9 @@ module f_hyperram(i_clk,
 	always @(posedge i_clk)
 	if (start_count == 3)
 		mem_addr <= cmd_addr[AW-1:0];
-	else if (active && (dly_rw_in == 2'b10))
+	else if (active && ((cmd_write)||(dly_rw_in == 2'b10)))
+		// The address always increments on a write
+		// On a read, it only increments when rwds == 2'b10
 		mem_addr <= mem_addr + 1;
 
 	always @(*)

@@ -9,7 +9,7 @@ prf: mode	prove
 cvr: mode	cover
 
 prf: depth  40
-cvr: depth 180
+cvr: depth  80
 
 [engines]
 smtbmc
@@ -21,6 +21,7 @@ read -formal wbhyperram.v
 pipe:  chparam -set OPT_PIPE 1    wbhyperram
 ~pipe: chparam -set OPT_PIPE 0    wbhyperram
 cvr:   chparam -set F_OPT_COVER 1 wbhyperram
+~cvr:  chparam -set F_OPT_COVER 0 wbhyperram
 prep -top wbhyperram
 
 [files]

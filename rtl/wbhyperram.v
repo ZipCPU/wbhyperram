@@ -73,7 +73,8 @@ module wbhyperram(i_clk, i_reset,
 	// values set here and the values returned.
 	//
 	// For Xilinx, this number should be 3
-	parameter	RDDELAY = 3;
+	// For Altera, with registered I/O, this number should be 2
+	parameter	RDDELAY = 0;
 	//
 `ifdef	FORMAL
 	//
@@ -295,18 +296,6 @@ module wbhyperram(i_clk, i_reset,
 	else if (last_cke)
 		o_hram_csn <= 1'b1;
 
-	/*
-	initial	o_hram_cke = 1'b0;
-	always @(posedge i_clk)
-	if (i_reset)
-		o_hram_cke <= 1'b0;
-	else if ((bus_stb)||(cmd_output))
-		o_hram_cke <= 1'b1;
-	else if ((state_ctr == 1)
-			&&((cti_write)||(i_hram_rwds[1]))
-			&&((!OPT_PIPE)||(!i_wb_stb)||(o_wb_stall)))
-		o_hram_cke <= 1'b0;
-	*/
 	always @(*)
 		o_hram_cke = !o_hram_csn;
 
@@ -371,6 +360,24 @@ module wbhyperram(i_clk, i_reset,
 	else
 		cmd_reg <= { cmd_reg[31:0], 16'h00 };
 
+	reg	latency_stb;
+	generate if (RDDELAY <= 2)
+	begin
+		always @(*)
+			latency_stb = 0;
+	end else begin
+		reg	latency_pipe[RDDELAY-1:0];
+
+		initial	latency_pipe = 0;
+		always @(posedge i_clk)
+		if (i_wb_stb && !o_wb_stall && i_hram_csn && !fixed_latency)
+			latency_pipe <= 1;
+		else
+			latency_pipe <= latency_pipe << 1;
+
+		always @(*)
+			latency_stb = latency_pipe[RDDELAY-1];
+	end endgenerate
 	//////////////////////////
 	//
 	// Read/write state counter output
@@ -384,7 +391,7 @@ module wbhyperram(i_clk, i_reset,
 		state_ctr <= 1;
 	else if (cmd_output)
 	begin
-		casez({(i_hram_rwds[0]||fixed_latency), cti_dev, cti_write})
+		casez({((i_hram_rwds[0]&&(RDDELAY<=2))||fixed_latency), cti_dev, cti_write})
 		3'b0?0: state_ctr <= 1 + { 1'b0, latency };
 		3'b001: state_ctr <= 1 + { 1'b0, latency };
 		3'b?11: state_ctr <= 1;
@@ -392,7 +399,9 @@ module wbhyperram(i_clk, i_reset,
 		3'b101: state_ctr <= 1 + { latency, 1'b0 };
 		default: state_ctr <= 1;
 		endcase
-	end else if (pipe_stb)
+	end else if (latency_stb && i_hram_rwds[0])
+		state_ctr <= state_ctr + latency - 1'b1;
+	else if (pipe_stb)
 		state_ctr <= 2;
 	else if (state_ctr > 2)
 		state_ctr <= state_ctr - 1'b1;
@@ -811,7 +820,7 @@ module wbhyperram(i_clk, i_reset,
 		if ((i_wb_stb)&&(!o_wb_stall)&&(i_wb_we))
 		begin
 			f_wb_data_copy <= i_wb_data;
-			f_wb_sel_copy <= i_wb_sel;
+			f_wb_sel_copy  <= i_wb_sel;
 		end
 
 		if ((!cmd_output)&&(!cti_write)&&(!cti_dev)&&(i_hram_rwds[1]))
@@ -860,9 +869,9 @@ module wbhyperram(i_clk, i_reset,
 	end
 
 	always @(posedge i_clk)
-	if ((f_past_valid)&&($past(o_wb_ack))
+	if ((f_past_valid)&&(!$past(i_reset))&&($past(o_wb_ack))
 		&&($past({cti_dev, cti_write },2)==2'b01)
-		&&($past(f_wb_addr_copy)==fv_addr[AW:1]))
+		&&($past(f_wb_addr_copy,2)==fv_addr[AW:1]))
 		// &&($past(state_ctr,8)==3) // This passes
 	begin
 		if ((!fv_addr[0])&&($past(f_wb_sel_copy[3],2)))
@@ -870,9 +879,9 @@ module wbhyperram(i_clk, i_reset,
 		if ((!fv_addr[0])&&($past(f_wb_sel_copy[2],2)))
 			assert(fv_data[7:0] == $past(f_wb_data_copy[23:16],2));
 
-		if ((fv_addr[0])&&($past(f_wb_sel_copy[3],2)))
+		if ((fv_addr[0])&&($past(f_wb_sel_copy[1],2)))
 			assert(fv_data[15:8] == $past(f_wb_data_copy[15:8],2));
-		if ((fv_addr[0])&&($past(f_wb_sel_copy[2],2)))
+		if ((fv_addr[0])&&($past(f_wb_sel_copy[0],2)))
 			assert(fv_data[7:0] == $past(f_wb_data_copy[7:0],2));
 	end
 
@@ -960,9 +969,8 @@ module wbhyperram(i_clk, i_reset,
 	always @(posedge i_clk)
 	if (o_wb_ack)
 	begin
-		cover(!cti_write);
-		cover({cti_write, cti_dev } == 2'b11);
-
+		cover(f_startread[13]);
+		cover(f_startwrite[13]);
 	end else if ((f_past_valid)&&($past(o_wb_ack)))
 	begin
 		cover((!i_wb_cyc)&&($past(o_wb_ack))&&($past(i_wb_we)));
@@ -975,12 +983,20 @@ module wbhyperram(i_clk, i_reset,
 		if (f_past_valid)
 		begin
 
+		cover(pipe_req && (|f_startread));
+		cover(($past(pipe_stb)) && !cti_write);
 		cover(($past(pipe_stb,3))&&($past(pipe_stb)) &&  cti_write);
 		cover(($past(pipe_stb,3))&&($past(pipe_stb)) && !cti_write);
-		cover((i_wb_stb)&&(chip_select_warning));
-		cover(chip_select_count == (CK_CSM[CSM_BITS-1:0]-6));
+		// cover((i_wb_stb)&&(chip_select_warning));	// will fail
+		// cover(chip_select_count == (CK_CSM[CSM_BITS-1:0]-6));
 		cover(pipe_req);
 		cover(pipe_stb);
+		cover(f_piperead[0]);
+		cover(f_pipewrite[0]);
+		cover(f_piperead[1]);
+		cover(f_pipewrite[1]);
+		cover(o_wb_ack && f_piperead[2]);
+		cover(o_wb_ack && f_pipewrite[2]);
 		end
 	end endgenerate
 
@@ -1083,7 +1099,7 @@ module wbhyperram(i_clk, i_reset,
 	if (i_reset)
 		f_startread <= 0;
 	else begin
-		f_startread <= { f_startread[14:0], 1'b0 };
+		f_startread <= { f_startread[12:0], 1'b0 };
 		if (|f_startread[12:11])
 		begin
 			f_startread[13:11] <= f_startread[13:11];
@@ -1095,6 +1111,8 @@ module wbhyperram(i_clk, i_reset,
 		begin
 			assert(f_devwrite == 0);
 			assert(f_cmdseq == 0);
+			if (!f_startread[13])
+				assert(cti_write == 0);
 		end
 
 		// latency can be 3-6
@@ -1109,7 +1127,8 @@ module wbhyperram(i_clk, i_reset,
 		if (|f_startread[12:0])
 		begin
 			assert(!o_wb_ack);
-			assert(o_wb_stall);
+			if (!OPT_PIPE || !f_startread[12])
+				assert(o_wb_stall);
 
 			assert(!o_hram_csn);
 			assert( o_hram_cke);
@@ -1122,29 +1141,29 @@ module wbhyperram(i_clk, i_reset,
 		end
 
 		if (f_startread[ 8])
-			assert(cmd_ctr == 5);
+			assert(state_ctr == 5);
 
 		if (f_startread[ 9])
-			assert(cmd_ctr == 4);
+			assert(state_ctr == 4);
 
 		if (f_startread[10])
-			assert(cmd_ctr == 3);
+			assert(state_ctr == 3);
 
 		if (f_startread[11])
 		begin
-			assert(cmd_ctr == 2);
+			assert(state_ctr == 2);
 			f_startread_data[31:16] <= i_hram_data;
 		end
 
 		if (f_startread[12])
 		begin
-			assert(cmd_ctr == 1);
+			assert(state_ctr == 1);
 			f_startread_data[15: 0] <= i_hram_data;
 		end
 
 		if (f_startread[13])
 		begin
-			assert(cmd_ctr == 0);
+			assert((state_ctr == 0)||(state_ctr == 2));
 			assert( o_wb_ack || !$past(pre_ack)||!$past(i_wb_cyc));
 			assert(o_wb_data == f_startread_data);
 		end
@@ -1152,13 +1171,59 @@ module wbhyperram(i_clk, i_reset,
 		cover(f_startread[13] && o_wb_ack);
 	end
 
+	reg	[2:0]	f_piperead;
+	initial	f_piperead = 0;
+	always @(posedge i_clk)
+	if ((!OPT_PIPE)||(i_reset))
+		f_piperead <= 0;
+	else begin
+		if (i_hram_rwds[1])
+			f_piperead <= { f_piperead[1:0], 1'b0 };
+		else
+			f_piperead[2] <= 1'b0;
+		if ((f_startread[12]||f_piperead[1])&&i_wb_stb && !o_wb_stall)
+		begin
+			assert(state_ctr == 1);
+			f_piperead[0] <= 1'b1;
+		end
+	end
+
+	always @(*)
+	begin
+		if (!OPT_PIPE)
+			assert(f_piperead == 0);
+
+		if (f_piperead[0])
+		begin
+			assert(state_ctr == 2);
+			assert(!cti_write);
+			assert(o_wb_stall);
+		end 
+
+		if (f_piperead[1])
+		begin
+			assert(state_ctr == 1);
+			assert(!cti_write);
+			assert(!o_wb_ack);
+			assert(!f_piperead[2]);
+			assert(!f_piperead[0]);
+		end 
+
+		if (f_piperead[2])
+		begin
+			assert(state_ctr == 0 || (f_piperead[0]));
+		end 
+	end
+
+
 	reg	[13:0]	f_startwrite;
 	reg	[31:0]	f_startwrite_data;
+	initial	f_startwrite = 0;
 	always @(posedge i_clk)
 	if (i_reset)
 		f_startwrite = 0;
 	else begin
-		f_startwrite <= { f_startwrite[14:0], 1'b0 };
+		f_startwrite <= { f_startwrite[12:0], 1'b0 };
 		// latency can be 3-6
 		if (f_cmdseq[2] && !cti_dev && cti_write)
 		begin
@@ -1173,15 +1238,16 @@ module wbhyperram(i_clk, i_reset,
 			assert(f_devwrite  == 0);
 			assert(f_cmdseq    == 0);
 			assert(f_startread == 0);
-
+			assert(cti_write);
+			assert(!cti_dev);
 		end
 
-		if (|f_startwrite[13:0])
+		if (|f_startwrite[12:0])
 		begin
 			assert(!o_wb_ack);
 			if (!OPT_PIPE)
 				assert( o_wb_stall);
-			else if (!f_startwrite[11])
+			else if (|f_startwrite[11:0])
 				assert(o_wb_stall);
 			//
 			assert(!o_hram_csn);
@@ -1190,7 +1256,8 @@ module wbhyperram(i_clk, i_reset,
 			assert(!cti_dev);
 			assert(!cmd_output);
 			assert(o_hram_drive_data);
-			assert(o_hram_rwctrl == RWDS_OUT);
+			if (|f_startwrite[12:11])
+				assert(o_hram_rwctrl == RWDS_OUT);
 		end
 
 		if (f_startwrite[11])
@@ -1223,24 +1290,71 @@ module wbhyperram(i_clk, i_reset,
 		*/
 	end
 
-/*
-	reg	[2:0]	f_piperead;
-
-	initial	f_piperead = 0;
+	reg	[2:0]	f_pipewrite;
+	initial	f_pipewrite = 0;
 	always @(posedge i_clk)
-	if (i_reset)
-		f_piperead <= 0;
+	if ((!OPT_PIPE)||(i_reset))
+		f_pipewrite <= 0;
 	else begin
-		if (i_rwds == 2'b10)
-			f_piperead <= { f_piperead[1:0], 1'b0 };
-		if (!cti_write && bus_stb)
-			f_piperead[0] <= 1'b1;
-		if (|f_piperead)
-		begin
-		end	
-	end
-*/
+		f_pipewrite <= { f_pipewrite[1:0], 1'b0 };
 
+		if ((f_startwrite[12]||f_pipewrite[1])&&i_wb_stb && !o_wb_stall)
+		begin
+			assert(state_ctr == 1);
+			assert(!cti_dev);
+			assert(cti_write);
+			f_pipewrite[0] <= 1'b1;
+		end
+	end
+
+	always @(*)
+	begin
+		if (!OPT_PIPE)
+			assert(f_pipewrite == 0);
+
+		if (|f_pipewrite)
+			assert(f_piperead == 0);
+
+		if (f_pipewrite[0])
+		begin
+			assert(state_ctr == 2);
+			assert(cti_write);
+			assert(!cti_dev);
+			assert(o_wb_stall);
+		end 
+
+		if (f_pipewrite[1])
+		begin
+			assert(state_ctr == 1);
+			assert(cti_write);
+			assert(!cti_dev);
+			assert(!o_wb_ack);
+			assert(!f_piperead[2]);
+			assert(!f_piperead[0]);
+		end 
+
+		if (f_pipewrite[2])
+		begin
+			assert(state_ctr == 0 || (f_pipewrite[0]));
+		end 
+	end
+
+
+
+	always @(*)
+	if (!o_hram_csn && !maintenance_stall)
+		assert((|f_startread) || (|f_startwrite)
+			||(|f_piperead)
+			||(|f_pipewrite)
+			||(|f_devwrite)
+			||(|f_cmdseq));
+
+	always @(*)
+	if (maintenance_stall)
+	begin
+		assert(f_startread      == 0);
+		assert(f_startwrite     == 0);
+	end
 `ifdef	VERIFIC
 
 

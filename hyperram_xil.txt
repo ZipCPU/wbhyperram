@@ -38,30 +38,33 @@
 ##
 @PREFIX=hyperram
 @DEVID=HYPERRAM
-@$LGMEMSZ=26-3
+@$LGMEMSZ=23
+@$LGMEMSZW=@$LGMEMSZ -2
 @LGMEMSZ.FORMAT=%d
 @$NADDR=(1<<(@$THIS.LGMEMSZ-2))
 @$NBYTES=(1<<(@$THIS.LGMEMSZ))
 @NBYTES.FORMAT=0x%08x
-@ACCESS=$(DEVID)_ACCESS
-@PTYPE=MEMORY
+@ACCESS=@$(DEVID)_ACCESS
+@SLAVE.TYPE=MEMORY
+@SLAVE.BUS=wb
+@BUS=@$(SLAVE.BUS)
 @LD.PERM=wx
 @TOP.PORTLIST=
 		// HyperRAM
 		o_@$(PREFIX)_reset_n, o_@$(PREFIX)_ck,
-			o_@$(REFIX)_csn, io_@$(PREFIX)_rwds,
+			o_@$(PREFIX)_csn, io_@$(PREFIX)_rwds,
 			io_@$(PREFIX)_data
 @TOP.IODECL=
 	// HyperRAM
 	output	wire		o_@$(PREFIX)_reset_n;
 	output	wire [1:0]	o_@$(PREFIX)_ck;
-	output	wire		o_@$(REFIX)_csn;
+	output	wire		o_@$(PREFIX)_csn;
 	inout	wire [1:0]	io_@$(PREFIX)_rwds;
 	inout	wire [7:0]	io_@$(PREFIX)_data;
 @TOP.MAIN=
 		// HyperRAM
 		o_@$(PREFIX)_reset_n, w_@$(PREFIX)_cke,
-			o_@$(REFIX)_csn, w_@$(PREFIX)_rwctrl,
+			o_@$(PREFIX)_csn, w_@$(PREFIX)_rwctrl,
 		o_@$(PREFIX)_rwds, i_@$(PREFIX)_rwds,
 		w_@$(PREFIX)_drive, o_@$(PREFIX)_data, i_@$(PREFIX)_data
 @TOP.DECL=
@@ -87,73 +90,97 @@
 
 
 @MAIN.PORTLIST=
-	o_@$(PREFIX)_reset_n, o_@$(PREFIX)_cke,
-			o_@$(REFIX)_csn, o_@$(PREFIX)_rwctrl,
-		o_@$(PREFIX)_rwds, i_@$(PREFIX)_rwds,
-		o_@$(PREFIX)_drive, o_@$(PREFIX)_data, i_@$(PREFIX)_data
+	// HyperRAM I/Os
+	o_@$(PREFIX)_reset_n, o_@$(PREFIX)_cke, o_@$(PREFIX)_csn,
+		o_@$(PREFIX)_rwctrl, o_@$(PREFIX)_rwds, i_@$(PREFIX)_rwds,
+		o_@$(PREFIX)_drive,  o_@$(PREFIX)_data, i_@$(PREFIX)_data
 @MAIN.IODECL=
+	// HyperRAM I/O's
 	output	wire	o_@$(PREFIX)_reset_n, o_@$(PREFIX)_cke,
-			o_@$(REFIX)_csn, o_@$(PREFIX)_rwctrl;
+			o_@$(PREFIX)_csn;
+	output	wire		o_@$(PREFIX)_rwctrl;
 	output	wire [1:0]	o_@$(PREFIX)_rwds;
 	input	wire [1:0]	i_@$(PREFIX)_rwds;
+	//
 	output	wire 		o_@$(PREFIX)_drive;
-	output	wire [7:0]	o_@$(PREFIX)_data;
-	input	wire [7:0]	i_@$(PREFIX)_data;
+	output	wire [15:0]	o_@$(PREFIX)_data;
+	input	wire [15:0]	i_@$(PREFIX)_data;
 @MAIN.INSERT=
-
+	// Create our HyperRAM controller
 	wbhyperram #(.CLOCK_RATE_HZ(@$(SLAVE.BUS.CLOCK.FREQUENCY)),
-			.OPT_PIPE(1'b1))
+			.AW(@$LGMEMSZW), .OPT_PIPE(1'b1))
 		@$(PREFIX)i(i_clk, i_reset, @$(BUS.NAME)_cyc,
 			(@$(BUS.NAME)_stb)&&((@$(PREFIX)_sel)
-					||(@$(PREFIX)_sel)),
+					||(@$(PREFIX)dev_sel)),
 			@$(BUS.NAME)_we,
-			{ !(@$(PREFIX)_sel), @$(BUS.NAME)_addr },
+			{ !(@$(PREFIX)dev_sel), @$(BUS.NAME)_addr[@$LGMEMSZW-1:0]},
 			@$(BUS.NAME)_data, @$(BUS.NAME)_sel,
 			@$(PREFIX)_stall, @$(PREFIX)_ack, @$(PREFIX)_data,
-			o_@$(PREFIX)_reset_n, o_@$(PREFIX)_cke,
-			o_@$(PREFIX)_rwctrl, o_@$(PREFIX)_rwds,
-			i_@$(PREFIX)_rwds, o_@$(PREFIX)_drive,
-			i_@$(PREFIX)_data, o_@$(PREFIX)_data);
+			o_@$(PREFIX)_reset_n, o_@$(PREFIX)_cke, o_@$(PREFIX)_csn,
+			o_@$(PREFIX)_rwctrl, o_@$(PREFIX)_rwds, i_@$(PREFIX)_rwds,
+			o_@$(PREFIX)_drive, o_@$(PREFIX)_data, i_@$(PREFIX)_data);
 
 @REGS.N=1
 @REGS.0= 0 R_@$(DEVID) @$(DEVID)
 @REGDEFS.H.DEFNS=
-#define	@$(DEVID)BASE	@$THIS.BASE
+#define	@$(DEVID)BASE	@$[0x%08x](THIS.BASE)
 #define	@$(DEVID)LEN	@$THIS.NBYTES
 @BDEF.OSDEF=_BOARD_HAS_@$(DEVID)
-@BDEF.OSVAL=extern int	_@$(PREFIX)[1];
-@LDSCRIPT.PSTR=	wx
-@LDSCRIPT.PTR=	@$(PREFIX)
-@LDSCRIPT.DEF=
-_@$(PREFIX) = ORIGIN(@$(PREFIX));
+@BDEF.OSVAL=extern char	_@$(PREFIX)[1];
+@LD.PERM=wx
+@LD.NAME=@$(PREFIX)
 @SIM.INCLUDE=
 #include "hyperramsim.h"
 @SIM.DEFNS=
+#ifdef @$(ACCESS)
 	HYPERRAMSIM	*m_@$(PREFIX);
+#endif
 @SIM.INIT=
+#ifdef @$(ACCESS)
 		m_@$(PREFIX) = new HYPERRAMSIM(@$NADDR);
+#endif
 @SIM.CLOCK=clk
 @SIM.TICK=
+#ifdef @$(ACCESS)
 		// Simulate the SDRAM
 		m_core->i_@$(PREFIX)_data = m_@$(PREFIX)->apply(
-			o_@$(PREFIX)_reset_n,
-			o_@$(PREFIX)_cke,
-			o_@$(PREFIX)_csn,
-			o_@$(PREFIX)_rwctrl,
-			o_@$(PREFIX)_rwds,
-			o_@$(PREFIX)_drive,
-			i_@$(PREFIX)_data);
-
-			i_@$(PREFIX)_stall,
-			i_@$(PREFIX)_data);
+			m_core->o_@$(PREFIX)_reset_n,
+			m_core->o_@$(PREFIX)_cke,
+			m_core->o_@$(PREFIX)_csn,
+			m_core->o_@$(PREFIX)_rwctrl,
+			m_core->o_@$(PREFIX)_rwds,
+			m_core->o_@$(PREFIX)_drive,
+			m_core->o_@$(PREFIX)_data);
 
 		m_core->i_@$(PREFIX)_rwds = HYPERRAMSIM::RWS(
 					m_core->i_@$(PREFIX)_data);
 		m_core->i_@$(PREFIX)_data = HYPERRAMSIM::DAT(
 					m_core->i_@$(PREFIX)_data);
-
+#endif
 @SIM.LOAD=
+#ifdef	@$(ACCESS)
 			// HyperRAM ignores the load function.  We'll put it
 			// here for good form, but it won't do anything
-			m_@$(PREFIX)->load(&m_core->block_ram[start],
-				&buf[offset], len >>2);
+			m_@$(PREFIX)->load(start, &buf[offset], len >>2);
+#endif
+@RTL.MAKE.GROUP= HYPERRAM
+@RTL.MAKE.FILES= wbhyperram.v
+#
+#
+#
+#
+#
+@PREFIX=hyperramdev
+@DEVID=HYPERRAMDEV
+@NADDR=1
+@SLAVE.BUS=wb
+@SLAVE.TYPE=OTHER
+@BDEF.IOTYPE=short
+@BDEF.IONAME=@$(PREFIX)
+@BDEF.OSVAL=static volatile @$BDEF.IOTYPE *const @$BDEF.IONAME = ((@$BDEF.IOTYPE *)@$[0x%08x](REGBASE));
+@REGS.N=1
+@REGS.0= 0 R_@$(DEVID) @$(DEVID)
+@MAIN.INSERT=
+	assign	@$(PREFIX)_ack   = 1'b0;
+	assign	@$(PREFIX)_stall = hyperram_stall;
+	assign	@$(PREFIX)_data  =    0;
